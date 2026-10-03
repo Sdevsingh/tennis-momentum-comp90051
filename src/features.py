@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from .config import WINDOW_SIZES, DECAY_RATES
+from .player_features import add_player_features, PLAYER_FEATURES
 
 
 def _prev_only(series: pd.Series) -> pd.Series:
@@ -91,15 +92,16 @@ def surprise_feature(match: pd.DataFrame, player_won_col: str,
     """Momentum as *departure from expectation*.
 
     surprise_t = EWMA over previous points of (outcome - expected_outcome),
-    where expected_outcome comes from a server+score-only baseline model.
+    where expected_outcome is the pre-match serve/return expectation for
+    this server against this returner (src/player_features.py). It uses
+    only matches played before this one, so it is CV-safe without fitting.
 
-    This separates "won more than a typical player would, given serve and
-    score" from "won because they were serving". It is the feature most
-    aligned with the research question.
+    This separates "won more than expected, given who is serving to whom"
+    from "won because they were serving". It is the feature most aligned
+    with the research question.
 
-    TODO(team): fit the server+score-only baseline (a tiny logistic reg on
-    server + score bucket) in a CV-safe way (train-fold only), predict
-    expected_p1_win for every point, then enable the lines below.
+    TODO(team): the expectation ignores the score. A score-aware baseline
+    (fitted on train folds only) could replace it.
     """
     if expected_col not in match.columns:
         match["surprise_ewma"] = 0.0
@@ -114,6 +116,12 @@ def build_features(points: pd.DataFrame, player_won_col: str = "p1_won") -> pd.D
 
     Grouping by match_id guarantees history never crosses match boundaries.
     """
+    # Pre-match player features (strength, serve/return, workload, ...),
+    # frozen for the whole match. First, because the surprise feature
+    # measures against their serve/return expectation.
+    points = add_player_features(points)
+    expected_col = "p_serve_expected" if player_won_col == "server_won" else "expected_p1_win"
+
     parts = []
     for _, match in points.groupby("match_id", sort=False):
         match = match.copy()
@@ -121,7 +129,7 @@ def build_features(points: pd.DataFrame, player_won_col: str = "p1_won") -> pd.D
         match = ewma_winrate(match, player_won_col)
         match = streak_length(match, player_won_col)
         match = pressure_features(match)
-        match = surprise_feature(match, player_won_col)
+        match = surprise_feature(match, player_won_col, expected_col)
         parts.append(match)
     out = pd.concat(parts, ignore_index=True)
 
@@ -137,4 +145,5 @@ FEATURE_COLUMNS = (
     + [f"ewma_d{d}" for d in DECAY_RATES]
     + ["streak_signed", "is_break_point", "is_set_point", "score_diff",
        "surprise_ewma", "server_is_p1"]
+    + PLAYER_FEATURES
 )
