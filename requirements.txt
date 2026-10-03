@@ -1,0 +1,14 @@
+# Core (data handling + numerics). Metrics/CV/tuning are from scratch.
+numpy>=1.24
+pandas>=2.0
+pyarrow>=12.0          # parquet for the processed point table
+
+# Plotting the already-computed results (allowed by the brief).
+matplotlib>=3.7
+
+# Complex model (Relational RNN). Install when implementing relational_rnn.py.
+# torch>=2.0
+
+# Optional, only if the team uses a library learner for gradient boosting
+# (confirm the from-scratch rule with Jean first).
+# scikit-learn>=1.3

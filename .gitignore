@@ -1,0 +1,25 @@
+# The brief says: DO NOT submit data. Keep it out of the repo entirely.
+data/raw/
+data/processed/
+*.parquet
+*.csv
+!data/README.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Results are committed (small JSON/figures), but not large dumps:
+results/*.pkl
