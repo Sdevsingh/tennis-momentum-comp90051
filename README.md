@@ -59,11 +59,7 @@ tennis-momentum-comp90051/
 │       └── exp4_reset_test.py        ← optional (game/set-break reset)
 ├── results/                   ← generated tables & figures (committed)
 ├── report/
-│   ├── report.tex             ← the actual 4-page report (LaTeX; prose final)
-│   ├── report.pdf             ← compiled draft
-│   ├── make_figures.py        ← builds report figures from results/*.json
-│   ├── figures/               ← generated figure PDFs land here
-│   └── report_skeleton.md     ← planning notes, rubric-aligned
+│   └── report_skeleton.md     ← 4-page report plan, rubric-aligned
 ├── docs/
 │   ├── meeting_minutes_template.md
 │   └── group_agreement_notes.md
@@ -99,24 +95,6 @@ python -m src.experiments.exp2_memory_horizon
 python -m src.experiments.exp3_positive_control
 ```
 
-## 6. Building the report
-
-The report is `report/report.tex`. All prose (introduction, literature review,
-methods, discussion, conclusion, bibliography) is final. The only things to
-replace are the red `\ph{...}` placeholders — the numbers from `results/*.json` —
-and the two figures:
-
-```bash
-# after running the experiments:
-python report/make_figures.py          # writes report/figures/*.pdf
-# then in report.tex swap the two \fbox placeholders for the \includegraphics
-# lines (already written as comments), fill the \ph{...} cells, and:
-cd report && pdflatex report.tex && pdflatex report.tex
-```
-
-Keep it to **4 pages** (10pt, 1.5–2cm margins, single column) — see the checklist
-in `report/report_skeleton.md`.
-
-## 7. Status
+## 6. Status
 
 This is the **initial scaffold** committed for the team to divide work from. Model internals and experiment bodies are stubbed with clear TODOs and docstrings describing the intended method. Nothing here is a final result.
