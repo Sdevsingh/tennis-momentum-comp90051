@@ -23,3 +23,9 @@ venv/
 
 # Results are committed (small JSON/figures), but not large dumps:
 results/*.pkl
+
+# LaTeX build artifacts
+report/*.aux
+report/*.log
+report/*.out
+report/*.synctex.gz
