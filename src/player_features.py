@@ -451,7 +451,9 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
                                        out["p2_serve_expected"])
     out["expected_p1_win"] = np.where(p1_serving, out["p1_serve_expected"],
                                       1.0 - out["p2_serve_expected"])
-    return out.drop(columns=["p1_serve_expected", "p2_serve_expected"])
+    # p1_/p2_serve_expected are kept (not model features): they seed the
+    # rolling serve win % before a player has served (features.py).
+    return out
 
 
 def main() -> None:

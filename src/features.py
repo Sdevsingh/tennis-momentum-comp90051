@@ -17,7 +17,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .config import WINDOW_SIZES, DECAY_RATES
+from .config import WINDOW_SIZES, DECAY_RATES, SERVE_GAME_WINDOWS
 from .player_features import add_player_features, PLAYER_FEATURES
 
 
@@ -69,6 +69,54 @@ def streak_length(match: pd.DataFrame, player_won_col: str) -> pd.DataFrame:
         streak[i] = run if w == 1 else -run
         prev = w
     match["streak_signed"] = streak
+    return match
+
+
+def rolling_serve_winpct(match: pd.DataFrame) -> pd.DataFrame:
+    """Each player's % of serve points won over their last k service games.
+
+    Uses only points before the current one. A service game in progress
+    counts as one of the k (with the points played so far). Tiebreaks,
+    where both players serve, count toward both players' windows.
+
+    Adds p1_/p2_serve_win_g{k} and server_serve_win_g{k} (whoever is serving
+    this point). Before a player has served in the match, the value is their
+    pre-match expected serve % (p{i}_serve_expected), not NaN -- the
+    experiments fillna(0), which would read as "won no serve points".
+    """
+    servers = match["point_server"].to_numpy()
+    winners = match["point_winner"].to_numpy()
+    games = list(zip(match["set_no"].to_numpy(), match["game_no"].to_numpy()))
+    n, kmax = len(match), max(SERVE_GAME_WINDOWS)
+
+    # per player: list of [game, points won, points served], newest last
+    history = {1: [], 2: []}
+    pct = {(p, k): np.full(n, np.nan) for p in (1, 2) for k in SERVE_GAME_WINDOWS}
+    for i in range(n):
+        for p in (1, 2):
+            h = history[p]
+            for k in SERVE_GAME_WINDOWS:
+                window = h[-k:]
+                served = sum(g[2] for g in window)
+                if served:
+                    pct[(p, k)][i] = sum(g[1] for g in window) / served
+        s = servers[i]
+        if s in history:
+            h = history[s]
+            if not h or h[-1][0] != games[i]:
+                h.append([games[i], 0, 0])
+                del h[:-kmax]
+            h[-1][1] += int(winners[i] == s)
+            h[-1][2] += 1
+
+    for p in (1, 2):
+        prior = match[f"p{p}_serve_expected"].to_numpy(dtype=float)
+        for k in SERVE_GAME_WINDOWS:
+            match[f"p{p}_serve_win_g{k}"] = np.where(np.isnan(pct[(p, k)]), prior, pct[(p, k)])
+    p1_serving = servers == 1
+    for k in SERVE_GAME_WINDOWS:
+        match[f"server_serve_win_g{k}"] = np.where(
+            p1_serving, match[f"p1_serve_win_g{k}"], match[f"p2_serve_win_g{k}"])
     return match
 
 
@@ -128,6 +176,7 @@ def build_features(points: pd.DataFrame, player_won_col: str = "p1_won") -> pd.D
         match = rolling_winrate(match, player_won_col)
         match = ewma_winrate(match, player_won_col)
         match = streak_length(match, player_won_col)
+        match = rolling_serve_winpct(match)
         match = pressure_features(match)
         match = surprise_feature(match, player_won_col, expected_col)
         parts.append(match)
@@ -145,5 +194,7 @@ FEATURE_COLUMNS = (
     + [f"ewma_d{d}" for d in DECAY_RATES]
     + ["streak_signed", "is_break_point", "is_set_point", "score_diff",
        "surprise_ewma", "server_is_p1"]
+    + [f"{who}_serve_win_g{k}" for k in SERVE_GAME_WINDOWS
+       for who in ("p1", "p2", "server")]
     + PLAYER_FEATURES
 )

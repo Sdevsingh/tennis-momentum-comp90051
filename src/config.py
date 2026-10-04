@@ -30,6 +30,9 @@ DECAY_RATES = [0.5, 0.7, 0.85, 0.95]
 # Window sizes for rolling win-rate features.
 WINDOW_SIZES = [1, 3, 5, 10, 20]
 
+# Rolling serve win %: windows in SERVICE GAMES (each player's own).
+SERVE_GAME_WINDOWS = [2, 4]
+
 # Outer CV: temporal repetitions (predict future from past).
 N_OUTER_REPEATS = 10
 # Inner CV for nested hyperparameter tuning.
