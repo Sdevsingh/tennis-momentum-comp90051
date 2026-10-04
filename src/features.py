@@ -135,6 +135,46 @@ def rolling_serve_winpct(match: pd.DataFrame) -> pd.DataFrame:
     return match
 
 
+def breaks_so_far(match: pd.DataFrame) -> pd.DataFrame:
+    """Breaks of serve won and conceded so far in the match.
+
+    A break is a completed service game won by the receiver; the game
+    winner is the winner of its last point. A game only counts once it is
+    over, so the game in progress never does. Tiebreaks (both players
+    serve) are not breaks. Counts run over the whole match, not per set.
+
+    Adds p1_breaks_won, p1_breaks_conceded (p2's are the same two swapped)
+    and server_breaks_won / server_breaks_conceded for whoever is serving
+    this point.
+    """
+    servers = match["point_server"].to_numpy()
+    winners = match["point_winner"].to_numpy()
+    games = list(zip(match["set_no"].to_numpy(), match["game_no"].to_numpy()))
+    n = len(match)
+
+    broken = {1: 0, 2: 0}            # service games lost, per player
+    won = np.zeros(n, dtype=int)     # p1 breaks won (= p2 broken)
+    conceded = np.zeros(n, dtype=int)
+    game_servers: set = set()
+    for i in range(n):
+        if i and games[i] != games[i - 1]:
+            # previous game just finished: was it a break?
+            if len(game_servers) == 1:
+                (s,) = game_servers
+                if s in broken and winners[i - 1] != s:
+                    broken[s] += 1
+            game_servers = set()
+        won[i], conceded[i] = broken[2], broken[1]
+        game_servers.add(servers[i])
+
+    match["p1_breaks_won"] = won
+    match["p1_breaks_conceded"] = conceded
+    p1_serving = servers == 1
+    match["server_breaks_won"] = np.where(p1_serving, won, conceded)
+    match["server_breaks_conceded"] = np.where(p1_serving, conceded, won)
+    return match
+
+
 def pressure_features(match: pd.DataFrame) -> pd.DataFrame:
     """Score-context / pressure indicators.
 
@@ -192,6 +232,7 @@ def build_features(points: pd.DataFrame, player_won_col: str = "p1_won") -> pd.D
         match = ewma_winrate(match, player_won_col)
         match = streak_length(match, player_won_col)
         match = rolling_serve_winpct(match)
+        match = breaks_so_far(match)
         match = pressure_features(match)
         match = surprise_feature(match, player_won_col, expected_col)
         parts.append(match)
@@ -227,6 +268,8 @@ POINT_FEATURES = (
     + ["streak_signed", "surprise_ewma"]
     + [f"{who}_serve_win_g{k}" for k in SERVE_GAME_WINDOWS
        for who in ("p1", "p2", "server")]
+    + ["p1_breaks_won", "p1_breaks_conceded",
+       "server_breaks_won", "server_breaks_conceded"]
     + ["is_break_point", "is_set_point", "score_diff", "server_is_p1"]
 )
 
