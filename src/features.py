@@ -17,7 +17,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .config import WINDOW_SIZES, DECAY_RATES, SERVE_GAME_WINDOWS
+from .config import WINDOW_SIZES, DECAY_RATES, SERVE_GAME_WINDOWS, SERVE_PRIOR_POINTS
 from .player_features import add_player_features, PLAYER_FEATURES
 
 
@@ -73,16 +73,23 @@ def streak_length(match: pd.DataFrame, player_won_col: str) -> pd.DataFrame:
 
 
 def rolling_serve_winpct(match: pd.DataFrame) -> pd.DataFrame:
-    """Each player's % of serve points won over their last k service games.
+    """Each player's serve win % over their last k service games, blended
+    with their pre-match expectation.
+
+        serve_win = (won + m * prior) / (served + m)
+
+    where won/served are the player's serve points in their last k service
+    games, prior is their pre-match expected serve % against this opponent
+    (p{i}_serve_expected, src/player_features.py) and m = SERVE_PRIOR_POINTS.
+    So the value starts at the pre-match expectation and moves toward recent
+    form as serve points accumulate; with a short window it stays a mix.
 
     Uses only points before the current one. A service game in progress
-    counts as one of the k (with the points played so far). Tiebreaks,
-    where both players serve, count toward both players' windows.
+    counts as one of the k (with the points played so far). Tiebreak points
+    count toward whoever served them.
 
     Adds p1_/p2_serve_win_g{k} and server_serve_win_g{k} (whoever is serving
-    this point). Before a player has served in the match, the value is their
-    pre-match expected serve % (p{i}_serve_expected), not NaN -- the
-    experiments fillna(0), which would read as "won no serve points".
+    this point).
     """
     servers = match["point_server"].to_numpy()
     winners = match["point_winner"].to_numpy()
@@ -91,15 +98,17 @@ def rolling_serve_winpct(match: pd.DataFrame) -> pd.DataFrame:
 
     # per player: list of [game, points won, points served], newest last
     history = {1: [], 2: []}
-    pct = {(p, k): np.full(n, np.nan) for p in (1, 2) for k in SERVE_GAME_WINDOWS}
+    prior = {p: match[f"p{p}_serve_expected"].to_numpy(dtype=float) for p in (1, 2)}
+    m = SERVE_PRIOR_POINTS
+    pct = {(p, k): np.empty(n) for p in (1, 2) for k in SERVE_GAME_WINDOWS}
     for i in range(n):
         for p in (1, 2):
             h = history[p]
             for k in SERVE_GAME_WINDOWS:
                 window = h[-k:]
+                won = sum(g[1] for g in window)
                 served = sum(g[2] for g in window)
-                if served:
-                    pct[(p, k)][i] = sum(g[1] for g in window) / served
+                pct[(p, k)][i] = (won + m * prior[p][i]) / (served + m)
         s = servers[i]
         if s in history:
             h = history[s]
@@ -110,9 +119,8 @@ def rolling_serve_winpct(match: pd.DataFrame) -> pd.DataFrame:
             h[-1][2] += 1
 
     for p in (1, 2):
-        prior = match[f"p{p}_serve_expected"].to_numpy(dtype=float)
         for k in SERVE_GAME_WINDOWS:
-            match[f"p{p}_serve_win_g{k}"] = np.where(np.isnan(pct[(p, k)]), prior, pct[(p, k)])
+            match[f"p{p}_serve_win_g{k}"] = pct[(p, k)]
     p1_serving = servers == 1
     for k in SERVE_GAME_WINDOWS:
         match[f"server_serve_win_g{k}"] = np.where(
