@@ -480,14 +480,21 @@ _PER_PLAYER = ["elo", "ts_mu", "ts_sigma", "serve_skill", "return_skill",
                "opp_retired_last_match", "retirements_90d", "h2h_wins",
                "elo_surface", "ts_surface_mu", "ts_surface_sigma", "surface_matches"]
 
-PLAYER_FEATURES = (
+# Same value on every point of a match.
+PLAYER_MATCH_FEATURES = (
     [f"p{i}_{c}" for c in _PER_PLAYER for i in (1, 2)]
-    + ["elo_diff", "p1_elo_win_prob", "elo_diff_server",
-       "p1_ts_win_prob", "ts_diff_server", "h2h_matches", "p1_h2h_share",
-       "elo_surface_diff", "p1_elo_surface_win_prob", "elo_surface_diff_server",
-       "p1_ts_surface_win_prob", "ts_surface_diff_server",
-       "p_serve_expected", "expected_p1_win", "player_features_known"]
+    + ["elo_diff", "p1_elo_win_prob", "p1_ts_win_prob",
+       "h2h_matches", "p1_h2h_share",
+       "elo_surface_diff", "p1_elo_surface_win_prob", "p1_ts_surface_win_prob",
+       "player_features_known"]
 )
+# Also pre-match information, seen from the current server's side: they flip
+# when the serve changes but are never updated by the match itself.
+PLAYER_SERVER_VIEW_FEATURES = [
+    "elo_diff_server", "ts_diff_server", "elo_surface_diff_server",
+    "ts_surface_diff_server", "p_serve_expected", "expected_p1_win",
+]
+PLAYER_FEATURES = PLAYER_MATCH_FEATURES + PLAYER_SERVER_VIEW_FEATURES
 
 
 def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.DataFrame:

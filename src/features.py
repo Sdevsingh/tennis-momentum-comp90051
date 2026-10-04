@@ -11,14 +11,21 @@ carry the server indicator to let models separate "momentum" from "serving".
 
 Each function appends columns to the per-match frame and returns it. Compose
 them in `build_features`.
+
+Every feature has a FeatureScope: MATCH (built only from information before
+the match) or POINT (updated during the match). `feature_columns(scope)`
+returns one group; FEATURE_COLUMNS is all of them.
 """
 from __future__ import annotations
+
+from enum import Enum
 
 import numpy as np
 import pandas as pd
 
 from .config import WINDOW_SIZES, DECAY_RATES, SERVE_GAME_WINDOWS, SERVE_PRIOR_POINTS
-from .player_features import add_player_features, PLAYER_FEATURES
+from .player_features import (add_player_features, PLAYER_MATCH_FEATURES,
+                              PLAYER_SERVER_VIEW_FEATURES)
 
 
 def _prev_only(series: pd.Series) -> pd.Series:
@@ -197,12 +204,42 @@ def build_features(points: pd.DataFrame, player_won_col: str = "p1_won") -> pd.D
     return out
 
 
-FEATURE_COLUMNS = (
+class FeatureScope(str, Enum):
+    """What information a feature is built from.
+
+    MATCH  only information from before the match starts (player history).
+           Fixed for the match; the server-view ones (elo_diff_server,
+           p_serve_expected, expected_p1_win, ...) are the same pre-match
+           values seen from whoever is serving, so they flip with the serve
+           but are never updated by what happens in the match.
+    POINT  updated during the match: built from points already played, or
+           the state of the current point (who is serving, the score).
+    """
+    MATCH = "match"
+    POINT = "point"
+
+
+MATCH_FEATURES = PLAYER_MATCH_FEATURES + PLAYER_SERVER_VIEW_FEATURES
+
+POINT_FEATURES = (
     [f"winrate_w{w}" for w in WINDOW_SIZES]
     + [f"ewma_d{d}" for d in DECAY_RATES]
-    + ["streak_signed", "is_break_point", "is_set_point", "score_diff",
-       "surprise_ewma", "server_is_p1"]
+    + ["streak_signed", "surprise_ewma"]
     + [f"{who}_serve_win_g{k}" for k in SERVE_GAME_WINDOWS
        for who in ("p1", "p2", "server")]
-    + PLAYER_FEATURES
+    + ["is_break_point", "is_set_point", "score_diff", "server_is_p1"]
 )
+
+FEATURE_SCOPE: dict[str, FeatureScope] = {
+    **{c: FeatureScope.MATCH for c in MATCH_FEATURES},
+    **{c: FeatureScope.POINT for c in POINT_FEATURES},
+}
+
+FEATURE_COLUMNS = MATCH_FEATURES + POINT_FEATURES
+
+
+def feature_columns(scope: FeatureScope | None = None) -> list[str]:
+    """All feature columns, or only those of one scope."""
+    if scope is None:
+        return list(FEATURE_COLUMNS)
+    return [c for c in FEATURE_COLUMNS if FEATURE_SCOPE[c] is scope]
