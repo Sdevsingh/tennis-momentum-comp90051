@@ -74,9 +74,10 @@ def load_points_file(path: Path) -> pd.DataFrame | None:
         return None
 
     out = df.rename(columns={v: k for k, v in colmap.items()})
-    keep = [c for c in COLUMN_ALIASES if c in out.columns]
+    keep = ["match_id"] + [c for c in COLUMN_ALIASES if c in out.columns]
+    # Each file is a whole tournament; the source's own match_id
+    # (e.g. 2023-usopen-1701) identifies the match.
     out = out[keep].copy()
-    out["match_id"] = path.stem  # e.g. 2023-usopen-1701
     # PointServer / PointWinner are 1/2 in the source. Drop rows where winner
     # is 0 (unplayed / data gaps).
     out = out[out["point_winner"].isin([1, 2])]
@@ -109,10 +110,9 @@ def build_point_table(raw_dir: Path = RAW_DIR) -> pd.DataFrame:
     table["p1_won"] = (table["point_winner"] == 1).astype(int)
     table["server_won"] = (table["point_winner"] == table["point_server"]).astype(int)
 
-    # Stable within-match ordering.
-    table = table.sort_values(
-        ["match_id", "set_no", "game_no", "point_no"], kind="stable"
-    ).reset_index(drop=True)
+    # Source rows are already in playing order within each match. Don't sort
+    # on point_no: it is read as text in files with '0X'/'0Y' rows, so
+    # "10" would sort before "2".
 
     print(
         f"Loaded {len(frames)} tournament files, "
