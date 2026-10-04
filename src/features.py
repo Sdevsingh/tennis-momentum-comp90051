@@ -216,6 +216,21 @@ def serve_bayes(match: pd.DataFrame) -> pd.DataFrame:
     return match
 
 
+def court_side(match: pd.DataFrame) -> pd.DataFrame:
+    """Which side of the court this point is served from.
+
+    Fixed by the rules: an even number of points already played in the game
+    (0, 2, 4, ...) means the deuce court, odd means the ad court. Tiebreaks
+    follow the same rule (first point from the deuce court, then two per
+    server starting from the ad court). Uses no point outcomes.
+
+    Adds serve_from_ad_court (1 = ad court, 0 = deuce court).
+    """
+    k = match.groupby(["set_no", "game_no"], sort=False).cumcount().to_numpy()
+    match["serve_from_ad_court"] = k % 2
+    return match
+
+
 def breaks_so_far(match: pd.DataFrame) -> pd.DataFrame:
     """Breaks of serve won and conceded so far in the match.
 
@@ -312,6 +327,7 @@ def build_features(points: pd.DataFrame, player_won_col: str = "p1_won") -> pd.D
         match = serve_winpct_match(match)
         match = serve_bayes(match)
         match = breaks_so_far(match)
+        match = court_side(match)
         match = pressure_features(match)
         match = surprise_feature(match, player_won_col, expected_col)
         parts.append(match)
@@ -352,7 +368,8 @@ POINT_FEATURES = (
     + ["p1_serve_bayes_map", "p2_serve_bayes_map",
        "p1_serve_bayes_sd", "p2_serve_bayes_sd"]
     + ["p1_breaks_won", "p1_breaks_conceded"]
-    + ["is_break_point", "is_set_point", "score_diff", "server_is_p1"]
+    + ["is_break_point", "is_set_point", "score_diff", "server_is_p1",
+       "serve_from_ad_court"]
 )
 
 FEATURE_SCOPE: dict[str, FeatureScope] = {
