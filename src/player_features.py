@@ -41,6 +41,15 @@ per player and records it BEFORE each match:
   Head-to-head            wins against this opponent in all earlier
                           meetings (any level); retirements count, walkovers
                           don't.
+  Surface ratings         a separate Elo and TrueSkill per surface (Hard,
+                          Clay, Grass, Carpet), updated only by matches on
+                          that surface. A player's first rating on a surface
+                          starts from their overall rating at that moment
+                          (TrueSkill 2 section 11: borrow across modes), with
+                          extra TrueSkill uncertainty; Elo then uses the
+                          new-player K for their first 30 matches there.
+                          Surface sigma grows with days since the player's
+                          last match ON THAT SURFACE.
 
 Walkovers update only the retirement/workload state (no tennis was played),
 never the ratings. Matches are ordered by tournament start date, then round
@@ -69,7 +78,8 @@ import pandas as pd
 from .config import (ARCHIVE_DIR, PROCESSED_DIR, ELO_START, ELO_K_NEW,
                      ELO_K_DEFAULT, ELO_K_ELITE, ELO_NEW_GAMES, ELO_ELITE_RATING,
                      TS_MU0, TS_SIGMA0, TS_BETA, TS_GAMMA, TS_TAU_PER_DAY,
-                     SERVE_ETA0, SERVE_ETA_MIN, SERVE_AVG_ALPHA)
+                     SERVE_ETA0, SERVE_ETA_MIN, SERVE_AVG_ALPHA,
+                     SURFACE_INIT_EXTRA_SIGMA)
 
 TOURS = {"atp": ["atp_matches_[0-9]*.csv", "atp_matches_qual_chall_*.csv"],
          "wta": ["wta_matches_[0-9]*.csv", "wta_matches_qual_itf_*.csv"]}
@@ -81,7 +91,7 @@ ROUND_ORDER = {"Q1": 0, "Q2": 1, "Q3": 2, "Q4": 3, "R128": 10, "R64": 11,
 SLAM_NAMES = {"ausopen": "australian open", "frenchopen": "roland garros",
               "wimbledon": "wimbledon", "usopen": "us open"}
 
-USECOLS = ["tourney_id", "tourney_name", "tourney_level", "tourney_date",
+USECOLS = ["tourney_id", "tourney_name", "surface", "tourney_level", "tourney_date",
            "match_num", "round", "score", "winner_id", "winner_name",
            "winner_age", "loser_id", "loser_name", "loser_age",
            "w_svpt", "w_1stWon", "w_2ndWon", "l_svpt", "l_1stWon", "l_2ndWon"]
@@ -92,7 +102,12 @@ PLAYER_COLS = ["elo", "ts_mu", "ts_sigma", "serve_skill", "return_skill",
                "stat_matches", "days_since_prev_event", "matches_prev_30d",
                "matches_this_event", "games_this_event", "prev_match_games",
                "career_matches", "slam_matches", "age", "retired_last_match",
-               "opp_retired_last_match", "retirements_90d", "h2h_wins"]
+               "opp_retired_last_match", "retirements_90d", "h2h_wins",
+               "elo_surface", "ts_surface_mu", "ts_surface_sigma", "surface_matches"]
+
+# Every slam is played on one surface, so the slam in match_id gives it.
+SLAM_SURFACE = {"ausopen": "Hard", "frenchopen": "Clay", "wimbledon": "Grass",
+                "usopen": "Hard"}
 
 
 # ------------------------------------------------------------------ helpers
@@ -153,7 +168,7 @@ def _days(date_int: np.ndarray) -> np.ndarray:
 class _Player:
     __slots__ = ("elo", "n", "elite", "mu", "s2", "S", "R", "n_stat",
                  "last_day", "event", "event_matches", "event_games",
-                 "prev_games", "slam", "recent", "quits", "last_status")
+                 "prev_games", "slam", "recent", "quits", "last_status", "surf")
 
     def __init__(self):
         self.elo, self.n, self.elite = float(ELO_START), 0, False
@@ -167,6 +182,38 @@ class _Player:
         self.recent = deque()      # event start days of matches played
         self.quits = deque()       # days of retirements / walkovers given
         self.last_status = 0       # 1 retired/withdrew, 2 opponent did
+        self.surf = {}             # surface -> _Surface
+
+
+class _Surface:
+    """One player's rating on one surface."""
+    __slots__ = ("elo", "n", "elite", "mu", "s2", "last_day")
+
+    def __init__(self, p: _Player, day: int):
+        # Start from the player's overall rating right now, less certain.
+        self.elo, self.n, self.elite = p.elo, 0, p.elite
+        self.mu = p.mu
+        self.s2 = min(p.s2 + SURFACE_INIT_EXTRA_SIGMA ** 2, TS_SIGMA0 ** 2)
+        self.last_day = day
+
+
+def _surface_state(p: _Player, surface, day: int):
+    """The player's rating on `surface`, drifted to `day` (None if unknown)."""
+    if not isinstance(surface, str):
+        return None
+    s = p.surf.get(surface)
+    if s is None:
+        s = p.surf[surface] = _Surface(p, day)
+    elif day > s.last_day:
+        s.s2 = min(s.s2 + TS_TAU_PER_DAY ** 2 * (day - s.last_day), TS_SIGMA0 ** 2)
+        s.last_day = day
+    return s
+
+
+def _surface_snapshot(s) -> list:
+    if s is None:
+        return [np.nan] * 4
+    return [s.elo, s.mu, math.sqrt(s.s2), s.n]
 
 
 # ------------------------------------------------------------ forward pass
@@ -182,6 +229,7 @@ def load_tour_matches(archive: Path, tour: str) -> pd.DataFrame:
     score = df["score"].fillna("").astype(str)
     df["walkover"] = score.str.contains("W/O|Walkover", case=False) | (score == "")
     df["retired"] = score.str.contains("RET", case=False)
+    df["surface"] = df["surface"].str.capitalize()      # a few rows say "clay"
     df["games"] = _games(df["score"])
     df["round_order"] = df["round"].map(ROUND_ORDER).fillna(14)
     df = df.sort_values(["tourney_date", "tourney_id", "round_order", "match_num"],
@@ -218,9 +266,9 @@ def run_forward_pass(m: pd.DataFrame) -> pd.DataFrame:
     cols = ["winner_id", "loser_id", "day", "tourney_id", "tourney_level",
             "round_order", "walkover", "retired", "games", "winner_age",
             "loser_age", "w_svpt", "w_1stWon", "w_2ndWon", "l_svpt",
-            "l_1stWon", "l_2ndWon"]
+            "l_1stWon", "l_2ndWon", "surface"]
     for (wid, lid, day, event, level, rnd, wo, ret, games, wage, lage,
-         wsv, w1, w2, lsv, l1, l2) in zip(*(m[c].to_numpy() for c in cols)):
+         wsv, w1, w2, lsv, l1, l2, surface) in zip(*(m[c].to_numpy() for c in cols)):
         W = players.setdefault(wid, _Player())
         L = players.setdefault(lid, _Player())
 
@@ -230,13 +278,30 @@ def run_forward_pass(m: pd.DataFrame) -> pd.DataFrame:
                 p.s2 = min(p.s2 + TS_TAU_PER_DAY ** 2 * (day - p.last_day),
                            TS_SIGMA0 ** 2)
 
-        w_rows.append(_snapshot(W, day, event, wage) + [h2h.get((wid, lid), 0)])
-        l_rows.append(_snapshot(L, day, event, lage) + [h2h.get((lid, wid), 0)])
+        Ws, Ls = _surface_state(W, surface, day), _surface_state(L, surface, day)
+
+        w_rows.append(_snapshot(W, day, event, wage) + [h2h.get((wid, lid), 0)]
+                      + _surface_snapshot(Ws))
+        l_rows.append(_snapshot(L, day, event, lage) + [h2h.get((lid, wid), 0)]
+                      + _surface_snapshot(Ls))
         avg_rows.append(np.nan if spw_avg is None else spw_avg)
 
         # ---- updates (after the snapshot, so nothing leaks into it)
         if not wo:
             h2h[(wid, lid)] = h2h.get((wid, lid), 0) + 1
+            # Surface Elo + TrueSkill, same rules as the overall ones
+            if Ws is not None:
+                e_s = expected_score(Ws.elo, Ls.elo)
+                kws, kls = k_factor(Ws.n, Ws.elite), k_factor(Ls.n, Ls.elite)
+                Ws.elo += kws * (1.0 - e_s)
+                Ls.elo -= kls * (1.0 - e_s)
+                Ws.elite |= Ws.elo >= ELO_ELITE_RATING
+                Ls.elite |= Ls.elo >= ELO_ELITE_RATING
+                Ws.mu, Ws.s2, Ls.mu, Ls.s2 = trueskill_update(Ws.mu, Ws.s2, Ls.mu, Ls.s2)
+                Ws.s2 += TS_GAMMA ** 2
+                Ls.s2 += TS_GAMMA ** 2
+                Ws.n += 1
+                Ls.n += 1
             # Elo
             e_w = expected_score(W.elo, L.elo)
             kw, kl = k_factor(W.n, W.elite), k_factor(L.n, L.elite)
@@ -357,6 +422,7 @@ def link_slam_matches(slam: pd.DataFrame, rated: pd.DataFrame) -> pd.DataFrame:
                 "p2_player_id": r.loser_id if p1_won else r.winner_id,
                 "p1_won_match": int(p1_won),
                 "spw_avg": r.spw_avg,
+                "tourney_id": r.tourney_id,
                 "link": level,
             })
             for c in PLAYER_COLS:
@@ -381,6 +447,15 @@ def link_slam_matches(slam: pd.DataFrame, rated: pd.DataFrame) -> pd.DataFrame:
     # toward 0.5 ((wins + 1) / (meetings + 2)), so 1-0 isn't read as 100%.
     out["h2h_matches"] = out["p1_h2h_wins"] + out["p2_h2h_wins"]
     out["p1_h2h_share"] = (out["p1_h2h_wins"] + 1) / (out["h2h_matches"] + 2)
+    # Surface ratings (surface from the slam, so unlinked matches have it too).
+    out["surface"] = out["match_id"].str.split("-").str[1].map(SLAM_SURFACE)
+    out["elo_surface_diff"] = out["p1_elo_surface"] - out["p2_elo_surface"]
+    out["p1_elo_surface_win_prob"] = 1.0 / (1.0 + 10.0 ** (-out["elo_surface_diff"] / 400.0))
+    ok = out["p1_ts_surface_mu"].notna() & out["p2_ts_surface_mu"].notna()
+    out["p1_ts_surface_win_prob"] = np.nan
+    out.loc[ok, "p1_ts_surface_win_prob"] = ts_win_prob(
+        out.loc[ok, "p1_ts_surface_mu"].to_numpy(float), out.loc[ok, "p1_ts_surface_sigma"].to_numpy(float),
+        out.loc[ok, "p2_ts_surface_mu"].to_numpy(float), out.loc[ok, "p2_ts_surface_sigma"].to_numpy(float))
     return out
 
 
@@ -402,14 +477,24 @@ _PER_PLAYER = ["elo", "ts_mu", "ts_sigma", "serve_skill", "return_skill",
                "days_since_prev_event", "matches_prev_30d", "matches_this_event",
                "games_this_event", "prev_match_games", "career_matches",
                "slam_matches", "age", "retired_last_match",
-               "opp_retired_last_match", "retirements_90d", "h2h_wins"]
+               "opp_retired_last_match", "retirements_90d", "h2h_wins",
+               "elo_surface", "ts_surface_mu", "ts_surface_sigma", "surface_matches"]
 
-PLAYER_FEATURES = (
+# Same value on every point of a match.
+PLAYER_MATCH_FEATURES = (
     [f"p{i}_{c}" for c in _PER_PLAYER for i in (1, 2)]
-    + ["elo_diff", "p1_elo_win_prob", "elo_diff_server",
-       "p1_ts_win_prob", "ts_diff_server", "h2h_matches", "p1_h2h_share",
-       "p_serve_expected", "expected_p1_win", "player_features_known"]
+    + ["elo_diff", "p1_elo_win_prob", "p1_ts_win_prob",
+       "h2h_matches", "p1_h2h_share",
+       "elo_surface_diff", "p1_elo_surface_win_prob", "p1_ts_surface_win_prob",
+       "player_features_known"]
 )
+# Also pre-match information, seen from the current server's side: they flip
+# when the serve changes but are never updated by the match itself.
+PLAYER_SERVER_VIEW_FEATURES = [
+    "elo_diff_server", "ts_diff_server", "elo_surface_diff_server",
+    "ts_surface_diff_server", "p_serve_expected", "expected_p1_win",
+]
+PLAYER_FEATURES = PLAYER_MATCH_FEATURES + PLAYER_SERVER_VIEW_FEATURES
 
 
 def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.DataFrame:
@@ -430,6 +515,8 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
     per = [f"p{i}_{c}" for c in _PER_PLAYER for i in (1, 2)]
     keep = ["match_id"] + per + ["elo_diff", "p1_elo_win_prob", "p1_ts_win_prob",
                                  "h2h_matches", "p1_h2h_share",
+                                 "elo_surface_diff", "p1_elo_surface_win_prob",
+                                 "p1_ts_surface_win_prob",
                                  "p1_serve_expected", "p2_serve_expected"]
     if path.exists():
         mf = pd.read_parquet(path)[keep]
@@ -452,6 +539,11 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
     out["p1_ts_win_prob"] = out["p1_ts_win_prob"].astype(float).fillna(0.5)
     out["h2h_matches"] = out["h2h_matches"].astype(float).fillna(0.0)
     out["p1_h2h_share"] = out["p1_h2h_share"].astype(float).fillna(0.5)
+    out["elo_surface_diff"] = out["elo_surface_diff"].astype(float).fillna(0.0)
+    out["p1_elo_surface_win_prob"] = out["p1_elo_surface_win_prob"].astype(float).fillna(0.5)
+    out["p1_ts_surface_win_prob"] = out["p1_ts_surface_win_prob"].astype(float).fillna(0.5)
+    # Not a model feature (yet): which surface the match is on.
+    out["surface"] = out["match_id"].astype(str).str.split("-").str[1].map(SLAM_SURFACE)
     for c in ("p1_serve_expected", "p2_serve_expected"):
         out[c] = out[c].astype(float).fillna(serve_neutral)
 
@@ -459,6 +551,8 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
     sign = np.where(p1_serving, 1.0, -1.0)
     out["elo_diff_server"] = sign * out["elo_diff"]
     out["ts_diff_server"] = sign * (out["p1_ts_mu"] - out["p2_ts_mu"])
+    out["elo_surface_diff_server"] = sign * out["elo_surface_diff"]
+    out["ts_surface_diff_server"] = sign * (out["p1_ts_surface_mu"] - out["p2_ts_surface_mu"])
     out["p_serve_expected"] = np.where(p1_serving, out["p1_serve_expected"],
                                        out["p2_serve_expected"])
     out["expected_p1_win"] = np.where(p1_serving, out["p1_serve_expected"],

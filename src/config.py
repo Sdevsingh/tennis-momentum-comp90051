@@ -55,6 +55,9 @@ TS_BETA = 25.0 / 6        # performance noise per match
 TS_GAMMA = 25.0 / 300     # skill drift per match played (TS2 eq. 2)
 TS_TAU_PER_DAY = 0.2      # skill drift per day away (TS2 eq. 3); a year off
                           # adds ~3.8 sd. Not tuned.
+# A player's first rating on a surface starts from their overall rating, with
+# this much extra TrueSkill sd (TrueSkill 2 section 11). Not tuned.
+SURFACE_INIT_EXTRA_SIGMA = 25.0 / 6
 
 # Serve/return skill: step size max(1/(n + ETA0), ETA_MIN) after each match
 # with stats; ETA0 acts as a prior of ETA0 average matches.
