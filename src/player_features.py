@@ -492,7 +492,7 @@ _PER_PLAYER = ["elo", "ts_mu", "ts_sigma", "serve_skill", "return_skill",
                "days_since_prev_event", "matches_prev_30d", "matches_this_event",
                "games_this_event", "prev_match_games", "career_matches",
                "slam_matches", "age", "retired_last_match",
-               "opp_retired_last_match", "retirements_90d", "h2h_wins",
+               "opp_retired_last_match", "retirements_90d",
                "elo_surface", "ts_surface_mu", "ts_surface_sigma", "surface_matches",
                "career_serve_win_pct", "stat_matches"]
 
@@ -500,7 +500,7 @@ _PER_PLAYER = ["elo", "ts_mu", "ts_sigma", "serve_skill", "return_skill",
 PLAYER_MATCH_FEATURES = (
     [f"p{i}_{c}" for c in _PER_PLAYER for i in (1, 2)]
     + ["elo_diff", "p1_elo_win_prob", "p1_ts_win_prob",
-       "h2h_matches", "p1_h2h_share",
+       "h2h_matches", "p1_h2h_win_pct", "p1_h2h_share",
        "elo_surface_diff", "p1_elo_surface_win_prob", "p1_ts_surface_win_prob",
        "player_features_known"]
 )
@@ -530,7 +530,7 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
     """
     per = [f"p{i}_{c}" for c in _PER_PLAYER for i in (1, 2)]
     keep = ["match_id"] + per + ["elo_diff", "p1_elo_win_prob", "p1_ts_win_prob",
-                                 "h2h_matches", "p1_h2h_share",
+                                 "p1_h2h_wins", "h2h_matches", "p1_h2h_share",
                                  "elo_surface_diff", "p1_elo_surface_win_prob",
                                  "p1_ts_surface_win_prob",
                                  "p1_serve_expected", "p2_serve_expected"]
@@ -556,6 +556,12 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
     out["p1_elo_win_prob"] = out["p1_elo_win_prob"].astype(float).fillna(0.5)
     out["p1_ts_win_prob"] = out["p1_ts_win_prob"].astype(float).fillna(0.5)
     out["h2h_matches"] = out["h2h_matches"].astype(float).fillna(0.0)
+    # Head-to-head win %: player 1's wins / earlier meetings (0.5 if none;
+    # p2's is 1 minus this).
+    p1_h2h = out["p1_h2h_wins"].astype(float).fillna(0.0)
+    out["p1_h2h_win_pct"] = np.where(out["h2h_matches"] > 0,
+                                     p1_h2h / out["h2h_matches"].clip(lower=1), 0.5)
+    out = out.drop(columns="p1_h2h_wins")
     out["p1_h2h_share"] = out["p1_h2h_share"].astype(float).fillna(0.5)
     out["elo_surface_diff"] = out["elo_surface_diff"].astype(float).fillna(0.0)
     out["p1_elo_surface_win_prob"] = out["p1_elo_surface_win_prob"].astype(float).fillna(0.5)
