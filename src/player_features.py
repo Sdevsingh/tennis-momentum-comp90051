@@ -38,6 +38,9 @@ per player and records it BEFORE each match:
   Retirements             retired/withdrew in the last match, did the last
                           opponent retire, retirements+walkovers given in
                           the last 90 days.
+  Head-to-head            wins against this opponent in all earlier
+                          meetings (any level); retirements count, walkovers
+                          don't.
 
 Walkovers update only the retirement/workload state (no tennis was played),
 never the ratings. Matches are ordered by tournament start date, then round
@@ -89,7 +92,7 @@ PLAYER_COLS = ["elo", "ts_mu", "ts_sigma", "serve_skill", "return_skill",
                "stat_matches", "days_since_prev_event", "matches_prev_30d",
                "matches_this_event", "games_this_event", "prev_match_games",
                "career_matches", "slam_matches", "age", "retired_last_match",
-               "opp_retired_last_match", "retirements_90d"]
+               "opp_retired_last_match", "retirements_90d", "h2h_wins"]
 
 
 # ------------------------------------------------------------------ helpers
@@ -208,6 +211,7 @@ def _snapshot(p: _Player, day: int, event, age) -> list:
 def run_forward_pass(m: pd.DataFrame) -> pd.DataFrame:
     """Walk matches in order; record both players' PRE-match state."""
     players: dict = {}
+    h2h: dict = {}                 # (winner_id, loser_id) -> wins of winner over loser
     w_rows, l_rows, avg_rows = [], [], []
     spw_avg = None
 
@@ -226,12 +230,13 @@ def run_forward_pass(m: pd.DataFrame) -> pd.DataFrame:
                 p.s2 = min(p.s2 + TS_TAU_PER_DAY ** 2 * (day - p.last_day),
                            TS_SIGMA0 ** 2)
 
-        w_rows.append(_snapshot(W, day, event, wage))
-        l_rows.append(_snapshot(L, day, event, lage))
+        w_rows.append(_snapshot(W, day, event, wage) + [h2h.get((wid, lid), 0)])
+        l_rows.append(_snapshot(L, day, event, lage) + [h2h.get((lid, wid), 0)])
         avg_rows.append(np.nan if spw_avg is None else spw_avg)
 
         # ---- updates (after the snapshot, so nothing leaks into it)
         if not wo:
+            h2h[(wid, lid)] = h2h.get((wid, lid), 0) + 1
             # Elo
             e_w = expected_score(W.elo, L.elo)
             kw, kl = k_factor(W.n, W.elite), k_factor(L.n, L.elite)
@@ -372,6 +377,10 @@ def link_slam_matches(slam: pd.DataFrame, rated: pd.DataFrame) -> pd.DataFrame:
                                 - out["p2_return_skill"]).clip(0.05, 0.95)
     out["p2_serve_expected"] = (out["spw_avg"] + out["p2_serve_skill"]
                                 - out["p1_return_skill"]).clip(0.05, 0.95)
+    # Head-to-head: meetings so far, and player 1's share of them smoothed
+    # toward 0.5 ((wins + 1) / (meetings + 2)), so 1-0 isn't read as 100%.
+    out["h2h_matches"] = out["p1_h2h_wins"] + out["p2_h2h_wins"]
+    out["p1_h2h_share"] = (out["p1_h2h_wins"] + 1) / (out["h2h_matches"] + 2)
     return out
 
 
@@ -393,12 +402,12 @@ _PER_PLAYER = ["elo", "ts_mu", "ts_sigma", "serve_skill", "return_skill",
                "days_since_prev_event", "matches_prev_30d", "matches_this_event",
                "games_this_event", "prev_match_games", "career_matches",
                "slam_matches", "age", "retired_last_match",
-               "opp_retired_last_match", "retirements_90d"]
+               "opp_retired_last_match", "retirements_90d", "h2h_wins"]
 
 PLAYER_FEATURES = (
     [f"p{i}_{c}" for c in _PER_PLAYER for i in (1, 2)]
     + ["elo_diff", "p1_elo_win_prob", "elo_diff_server",
-       "p1_ts_win_prob", "ts_diff_server",
+       "p1_ts_win_prob", "ts_diff_server", "h2h_matches", "p1_h2h_share",
        "p_serve_expected", "expected_p1_win", "player_features_known"]
 )
 
@@ -420,6 +429,7 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
     """
     per = [f"p{i}_{c}" for c in _PER_PLAYER for i in (1, 2)]
     keep = ["match_id"] + per + ["elo_diff", "p1_elo_win_prob", "p1_ts_win_prob",
+                                 "h2h_matches", "p1_h2h_share",
                                  "p1_serve_expected", "p2_serve_expected"]
     if path.exists():
         mf = pd.read_parquet(path)[keep]
@@ -440,6 +450,8 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
     out["elo_diff"] = out["elo_diff"].astype(float).fillna(0.0)
     out["p1_elo_win_prob"] = out["p1_elo_win_prob"].astype(float).fillna(0.5)
     out["p1_ts_win_prob"] = out["p1_ts_win_prob"].astype(float).fillna(0.5)
+    out["h2h_matches"] = out["h2h_matches"].astype(float).fillna(0.0)
+    out["p1_h2h_share"] = out["p1_h2h_share"].astype(float).fillna(0.5)
     for c in ("p1_serve_expected", "p2_serve_expected"):
         out[c] = out[c].astype(float).fillna(serve_neutral)
 
