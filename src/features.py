@@ -143,9 +143,8 @@ def breaks_so_far(match: pd.DataFrame) -> pd.DataFrame:
     over, so the game in progress never does. Tiebreaks (both players
     serve) are not breaks. Counts run over the whole match, not per set.
 
-    Adds p1_breaks_won, p1_breaks_conceded (p2's are the same two swapped)
-    and server_breaks_won / server_breaks_conceded for whoever is serving
-    this point.
+    Adds p1_breaks_won and p1_breaks_conceded (p2's are the same two
+    swapped). No server-view versions: models get server_is_p1.
     """
     servers = match["point_server"].to_numpy()
     winners = match["point_winner"].to_numpy()
@@ -169,9 +168,6 @@ def breaks_so_far(match: pd.DataFrame) -> pd.DataFrame:
 
     match["p1_breaks_won"] = won
     match["p1_breaks_conceded"] = conceded
-    p1_serving = servers == 1
-    match["server_breaks_won"] = np.where(p1_serving, won, conceded)
-    match["server_breaks_conceded"] = np.where(p1_serving, conceded, won)
     return match
 
 
@@ -268,8 +264,7 @@ POINT_FEATURES = (
     + ["streak_signed", "surprise_ewma"]
     + [f"{who}_serve_win_g{k}" for k in SERVE_GAME_WINDOWS
        for who in ("p1", "p2", "server")]
-    + ["p1_breaks_won", "p1_breaks_conceded",
-       "server_breaks_won", "server_breaks_conceded"]
+    + ["p1_breaks_won", "p1_breaks_conceded"]
     + ["is_break_point", "is_set_point", "score_diff", "server_is_p1"]
 )
 
