@@ -35,6 +35,12 @@ WINDOW_SIZES = [1, 3, 5, 10, 20]
 SERVE_GAME_WINDOWS = [2, 4]
 SERVE_PRIOR_POINTS = 8
 
+# Bayesian in-match serve estimate: prior N(career serve %, VAR / (n + OFFSET))
+# on the PERCENT scale, n = earlier matches with serve stats
+# (features.serve_bayes). n = 0 -> sd 7.1pp; n = 300 -> 4.5pp.
+SERVE_BAYES_PRIOR_VAR_PCT = 10_000.0
+SERVE_BAYES_PRIOR_N_OFFSET = 200
+
 # Outer CV: temporal repetitions (predict future from past).
 N_OUTER_REPEATS = 10
 # Inner CV for nested hyperparameter tuning.

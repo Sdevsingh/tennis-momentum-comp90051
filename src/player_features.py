@@ -35,6 +35,9 @@ per player and records it BEFORE each match:
                           `minutes` is missing for much of the WTA data.
   Experience              rated matches played, prior Slam main-draw
                           matches, age.
+  Career serve            share of serve points won over all earlier matches
+                          with stats, and how many matches that is (the
+                          prior for the in-match Bayesian serve estimate).
   Retirements             retired/withdrew in the last match, did the last
                           opponent retire, retirements+walkovers given in
                           the last 90 days.
@@ -103,7 +106,8 @@ PLAYER_COLS = ["elo", "ts_mu", "ts_sigma", "serve_skill", "return_skill",
                "matches_this_event", "games_this_event", "prev_match_games",
                "career_matches", "slam_matches", "age", "retired_last_match",
                "opp_retired_last_match", "retirements_90d", "h2h_wins",
-               "elo_surface", "ts_surface_mu", "ts_surface_sigma", "surface_matches"]
+               "elo_surface", "ts_surface_mu", "ts_surface_sigma", "surface_matches",
+               "career_serve_win_pct"]
 
 # Every slam is played on one surface, so the slam in match_id gives it.
 SLAM_SURFACE = {"ausopen": "Hard", "frenchopen": "Clay", "wimbledon": "Grass",
@@ -168,13 +172,15 @@ def _days(date_int: np.ndarray) -> np.ndarray:
 class _Player:
     __slots__ = ("elo", "n", "elite", "mu", "s2", "S", "R", "n_stat",
                  "last_day", "event", "event_matches", "event_games",
-                 "prev_games", "slam", "recent", "quits", "last_status", "surf")
+                 "prev_games", "slam", "recent", "quits", "last_status", "surf",
+                 "sp_won", "sp_total")
 
     def __init__(self):
         self.elo, self.n, self.elite = float(ELO_START), 0, False
         self.mu, self.s2 = TS_MU0, TS_SIGMA0 ** 2
         self.S = self.R = 0.0
         self.n_stat = 0
+        self.sp_won = self.sp_total = 0.0  # career serve points won / played
         self.last_day = None
         self.event, self.event_matches, self.event_games = None, 0, 0
         self.prev_games = 0
@@ -208,6 +214,11 @@ def _surface_state(p: _Player, surface, day: int):
         s.s2 = min(s.s2 + TS_TAU_PER_DAY ** 2 * (day - s.last_day), TS_SIGMA0 ** 2)
         s.last_day = day
     return s
+
+
+def _career_spw(p: _Player) -> float:
+    """Share of serve points won over all earlier matches with stats."""
+    return p.sp_won / p.sp_total if p.sp_total > 0 else np.nan
 
 
 def _surface_snapshot(s) -> list:
@@ -281,9 +292,9 @@ def run_forward_pass(m: pd.DataFrame) -> pd.DataFrame:
         Ws, Ls = _surface_state(W, surface, day), _surface_state(L, surface, day)
 
         w_rows.append(_snapshot(W, day, event, wage) + [h2h.get((wid, lid), 0)]
-                      + _surface_snapshot(Ws))
+                      + _surface_snapshot(Ws) + [_career_spw(W)])
         l_rows.append(_snapshot(L, day, event, lage) + [h2h.get((lid, wid), 0)]
-                      + _surface_snapshot(Ls))
+                      + _surface_snapshot(Ls) + [_career_spw(L)])
         avg_rows.append(np.nan if spw_avg is None else spw_avg)
 
         # ---- updates (after the snapshot, so nothing leaks into it)
@@ -330,6 +341,10 @@ def run_forward_pass(m: pd.DataFrame) -> pd.DataFrame:
                 W.R -= ew * r_l
                 W.n_stat += 1
                 L.n_stat += 1
+                W.sp_won += w1 + w2
+                W.sp_total += wsv
+                L.sp_won += l1 + l2
+                L.sp_total += lsv
                 spw_avg += SERVE_AVG_ALPHA * ((spw_w + spw_l) / 2 - spw_avg)
             if level == "G" and rnd >= 10:
                 W.slam += 1
@@ -478,7 +493,8 @@ _PER_PLAYER = ["elo", "ts_mu", "ts_sigma", "serve_skill", "return_skill",
                "games_this_event", "prev_match_games", "career_matches",
                "slam_matches", "age", "retired_last_match",
                "opp_retired_last_match", "retirements_90d", "h2h_wins",
-               "elo_surface", "ts_surface_mu", "ts_surface_sigma", "surface_matches"]
+               "elo_surface", "ts_surface_mu", "ts_surface_sigma", "surface_matches",
+               "career_serve_win_pct", "stat_matches"]
 
 # Same value on every point of a match.
 PLAYER_MATCH_FEATURES = (
@@ -530,6 +546,8 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
     for c in _PER_PLAYER:
         pooled = mf[[f"p1_{c}", f"p2_{c}"]].to_numpy(dtype=float)
         neutral = float(np.nanmedian(pooled)) if np.isfinite(pooled).any() else 0.0
+        if c == "stat_matches":
+            neutral = 0.0   # no known history -> widest serve prior in features.py
         for i in (1, 2):
             out[f"p{i}_{c}"] = out[f"p{i}_{c}"].astype(float).fillna(neutral)
     serve = mf[["p1_serve_expected", "p2_serve_expected"]].to_numpy(dtype=float)
