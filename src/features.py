@@ -135,6 +135,30 @@ def rolling_serve_winpct(match: pd.DataFrame) -> pd.DataFrame:
     return match
 
 
+def serve_winpct_match(match: pd.DataFrame) -> pd.DataFrame:
+    """Each player's serve win % over all their serve points so far in this
+    match, with no pre-match information.
+
+    Uses only points before the current one. Before a player has served,
+    the value is 0.5 (no information) rather than NaN, which the
+    experiments would fillna(0) into "won no serve points". The point
+    counts say how much each average is based on.
+
+    Adds p1_/p2_serve_win_match and p1_/p2_serve_points_match.
+    """
+    servers = match["point_server"].to_numpy()
+    winners = match["point_winner"].to_numpy()
+    for p in (1, 2):
+        served = (servers == p).astype(int)
+        won = (served == 1) & (winners == p)
+        n_before = np.cumsum(served) - served           # exclude this point
+        won_before = np.cumsum(won) - won
+        match[f"p{p}_serve_points_match"] = n_before
+        match[f"p{p}_serve_win_match"] = np.where(
+            n_before > 0, won_before / np.maximum(n_before, 1), 0.5)
+    return match
+
+
 def breaks_so_far(match: pd.DataFrame) -> pd.DataFrame:
     """Breaks of serve won and conceded so far in the match.
 
@@ -228,6 +252,7 @@ def build_features(points: pd.DataFrame, player_won_col: str = "p1_won") -> pd.D
         match = ewma_winrate(match, player_won_col)
         match = streak_length(match, player_won_col)
         match = rolling_serve_winpct(match)
+        match = serve_winpct_match(match)
         match = breaks_so_far(match)
         match = pressure_features(match)
         match = surprise_feature(match, player_won_col, expected_col)
@@ -264,6 +289,8 @@ POINT_FEATURES = (
     + ["streak_signed", "surprise_ewma"]
     + [f"{who}_serve_win_g{k}" for k in SERVE_GAME_WINDOWS
        for who in ("p1", "p2", "server")]
+    + ["p1_serve_win_match", "p2_serve_win_match",
+       "p1_serve_points_match", "p2_serve_points_match"]
     + ["p1_breaks_won", "p1_breaks_conceded"]
     + ["is_break_point", "is_set_point", "score_diff", "server_is_p1"]
 )
