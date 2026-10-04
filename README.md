@@ -49,8 +49,8 @@ tennis-momentum-comp90051/
 │   ├── nested_cv.py           ← nested CV + hyperparameter tuning, FROM SCRATCH
 │   ├── metrics.py             ← log-loss, Brier, AUC, calibration, FROM SCRATCH
 │   ├── models/
-│   │   ├── logistic_regression.py   ← simple (from scratch)
-│   │   ├── gradient_boosting.py     ← medium (wrapper + own tuning)
+│   │   ├── logistic_regression.py   ← simple (sklearn learner, own CV/tuning/metrics)
+│   │   ├── gradient_boosting.py     ← medium (LightGBM learner, own CV/tuning/metrics)
 │   │   └── relational_rnn.py        ← complex (Santoro et al. 2018, NeurIPS)
 │   └── experiments/
 │       ├── exp1_shuffle_control.py
