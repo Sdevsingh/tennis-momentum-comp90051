@@ -23,7 +23,8 @@ from enum import Enum
 import numpy as np
 import pandas as pd
 
-from .config import WINDOW_SIZES, DECAY_RATES, SERVE_GAME_WINDOWS, SERVE_PRIOR_POINTS
+from .config import (WINDOW_SIZES, DECAY_RATES, SERVE_GAME_WINDOWS, SERVE_PRIOR_POINTS,
+                     SERVE_BAYES_PRIOR_VAR_PCT, SERVE_BAYES_PRIOR_N_OFFSET)
 from .player_features import (add_player_features, PLAYER_MATCH_FEATURES,
                               PLAYER_SERVER_VIEW_FEATURES)
 
@@ -135,6 +136,122 @@ def rolling_serve_winpct(match: pd.DataFrame) -> pd.DataFrame:
     return match
 
 
+def serve_winpct_match(match: pd.DataFrame) -> pd.DataFrame:
+    """Each player's serve win % over all their serve points so far in this
+    match, with no pre-match information.
+
+    Uses only points before the current one. Before a player has served,
+    the value is 0.5 (no information) rather than NaN, which the
+    experiments would fillna(0) into "won no serve points". The point
+    counts say how much each average is based on.
+
+    Adds p1_/p2_serve_win_match and p1_/p2_serve_points_match.
+    """
+    servers = match["point_server"].to_numpy()
+    winners = match["point_winner"].to_numpy()
+    for p in (1, 2):
+        served = (servers == p).astype(int)
+        won = (served == 1) & (winners == p)
+        n_before = np.cumsum(served) - served           # exclude this point
+        won_before = np.cumsum(won) - won
+        match[f"p{p}_serve_points_match"] = n_before
+        match[f"p{p}_serve_win_match"] = np.where(
+            n_before > 0, won_before / np.maximum(n_before, 1), 0.5)
+    return match
+
+
+def _serve_posterior(k, m, mu0, tau0):
+    """MAP and sd of theta for: theta ~ N(mu0, 1/tau0) on [0, 1], then k wins
+    in m Bernoulli(theta) serve points. All arguments are arrays.
+
+    The log posterior  -tau0 (theta - mu0)^2 / 2 + k log theta
+    + (m - k) log(1 - theta)  is strictly concave, so its derivative has a
+    single root: found by bisection. The sd is the Laplace approximation,
+    1 / sqrt(curvature at the MAP), capped at the sd of a uniform (0.289).
+    """
+    lo, hi = np.full(k.shape, 1e-6), np.full(k.shape, 1 - 1e-6)
+    for _ in range(50):
+        mid = (lo + hi) / 2
+        grad = -tau0 * (mid - mu0) + k / mid - (m - k) / (1 - mid)
+        up = grad > 0
+        lo, hi = np.where(up, mid, lo), np.where(up, hi, mid)
+    theta = (lo + hi) / 2
+    flat = (tau0 == 0) & (m == 0)                  # no information at all
+    theta = np.where(flat, 0.5, theta)
+    curv = tau0 + k / theta ** 2 + (m - k) / (1 - theta) ** 2
+    sd = np.minimum(1 / np.sqrt(np.maximum(curv, 1e-12)), np.sqrt(1 / 12))
+    return theta, sd
+
+
+def serve_bayes(match: pd.DataFrame) -> pd.DataFrame:
+    """Bayesian estimate of each player's chance of winning a point on serve.
+
+    Prior: theta ~ Normal(career serve %, 10000 / (n + 200)) on the PERCENT
+    scale (SERVE_BAYES_PRIOR_VAR_PCT, SERVE_BAYES_PRIOR_N_OFFSET), i.e.
+    sd = sqrt(10000 / (n + 200)) percentage points: 7.1 for a player with
+    no history, 4.5 at n = 300. Career serve % and n are over the player's
+    earlier matches with serve stats (src/player_features.py). Truncated
+    to [0, 1].
+    Likelihood: each of the player's serve points so far in this match
+    (before the current point) is Bernoulli(theta).
+
+    Adds p{i}_serve_bayes_map (posterior mode) and p{i}_serve_bayes_sd
+    (posterior sd, Laplace approximation).
+    """
+    servers = match["point_server"].to_numpy()
+    winners = match["point_winner"].to_numpy()
+    for p in (1, 2):
+        served = (servers == p).astype(float)
+        won = served * (winners == p)
+        m = np.cumsum(served) - served               # exclude this point
+        k = np.cumsum(won) - won
+        n = match[f"p{p}_stat_matches"].to_numpy(dtype=float)
+        mu0 = match[f"p{p}_career_serve_win_pct"].to_numpy(dtype=float)
+        # var = VAR_PCT / (n + OFFSET) in percent^2 -> precision on the 0-1 scale
+        tau0 = (n + SERVE_BAYES_PRIOR_N_OFFSET) * 10_000 / SERVE_BAYES_PRIOR_VAR_PCT
+        mu0 = np.where(np.isfinite(mu0), mu0, 0.5)
+        theta, sd = _serve_posterior(k, m, mu0, tau0)
+        match[f"p{p}_serve_bayes_map"] = theta
+        match[f"p{p}_serve_bayes_sd"] = sd
+    return match
+
+
+def breaks_so_far(match: pd.DataFrame) -> pd.DataFrame:
+    """Breaks of serve won and conceded so far in the match.
+
+    A break is a completed service game won by the receiver; the game
+    winner is the winner of its last point. A game only counts once it is
+    over, so the game in progress never does. Tiebreaks (both players
+    serve) are not breaks. Counts run over the whole match, not per set.
+
+    Adds p1_breaks_won and p1_breaks_conceded (p2's are the same two
+    swapped). No server-view versions: models get server_is_p1.
+    """
+    servers = match["point_server"].to_numpy()
+    winners = match["point_winner"].to_numpy()
+    games = list(zip(match["set_no"].to_numpy(), match["game_no"].to_numpy()))
+    n = len(match)
+
+    broken = {1: 0, 2: 0}            # service games lost, per player
+    won = np.zeros(n, dtype=int)     # p1 breaks won (= p2 broken)
+    conceded = np.zeros(n, dtype=int)
+    game_servers: set = set()
+    for i in range(n):
+        if i and games[i] != games[i - 1]:
+            # previous game just finished: was it a break?
+            if len(game_servers) == 1:
+                (s,) = game_servers
+                if s in broken and winners[i - 1] != s:
+                    broken[s] += 1
+            game_servers = set()
+        won[i], conceded[i] = broken[2], broken[1]
+        game_servers.add(servers[i])
+
+    match["p1_breaks_won"] = won
+    match["p1_breaks_conceded"] = conceded
+    return match
+
+
 def pressure_features(match: pd.DataFrame) -> pd.DataFrame:
     """Score-context / pressure indicators.
 
@@ -192,6 +309,9 @@ def build_features(points: pd.DataFrame, player_won_col: str = "p1_won") -> pd.D
         match = ewma_winrate(match, player_won_col)
         match = streak_length(match, player_won_col)
         match = rolling_serve_winpct(match)
+        match = serve_winpct_match(match)
+        match = serve_bayes(match)
+        match = breaks_so_far(match)
         match = pressure_features(match)
         match = surprise_feature(match, player_won_col, expected_col)
         parts.append(match)
@@ -227,6 +347,11 @@ POINT_FEATURES = (
     + ["streak_signed", "surprise_ewma"]
     + [f"{who}_serve_win_g{k}" for k in SERVE_GAME_WINDOWS
        for who in ("p1", "p2", "server")]
+    + ["p1_serve_win_match", "p2_serve_win_match",
+       "p1_serve_points_match", "p2_serve_points_match"]
+    + ["p1_serve_bayes_map", "p2_serve_bayes_map",
+       "p1_serve_bayes_sd", "p2_serve_bayes_sd"]
+    + ["p1_breaks_won", "p1_breaks_conceded"]
     + ["is_break_point", "is_set_point", "score_diff", "server_is_p1"]
 )
 
