@@ -9,6 +9,6 @@ matplotlib>=3.7
 # Complex model (Relational RNN). Install when implementing relational_rnn.py.
 # torch>=2.0
 
-# Optional, only if the team uses a library learner for gradient boosting
-# (confirm the from-scratch rule with Jean first).
-# scikit-learn>=1.3
+# Learners only (CV, tuning and metrics stay from scratch):
+scikit-learn>=1.3      # logistic regression
+lightgbm>=4.0          # gradient boosting

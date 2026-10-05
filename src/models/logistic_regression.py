@@ -1,12 +1,21 @@
-"""Simple model: L2-regularised logistic regression via gradient descent.
+"""Simple model: L2-regularised logistic regression.
 
-Implemented from scratch (no sklearn) so it can stand as the clearly-documented
-simple baseline. Tunable hyperparameter: L2 strength `lam` (the brief needs at
-least one, with the middle grid value usually chosen).
+The learner is scikit-learn's LogisticRegression (L-BFGS), for speed: it
+converges in tens of iterations where plain gradient descent took hundreds
+of full passes over ~1.5M rows. Only the learner comes from the library --
+cross-validation, tuning and metrics stay hand-written (cross_validation.py,
+nested_cv.py, metrics.py); nothing here uses sklearn's CV or metrics.
+
+Same objective as the original gradient-descent version:
+    mean log-loss + lam / (2n) * ||w||^2   (intercept not penalised)
+which is sklearn's  C * sum(log-loss) + ||w||^2 / 2  with C = 1 / lam.
+Tunable hyperparameter: L2 strength `lam` (the brief needs at least one,
+with the middle grid value usually chosen).
 """
 from __future__ import annotations
 
 import numpy as np
+from sklearn.linear_model import LogisticRegression as _SkLogisticRegression
 
 
 def _sigmoid(z: np.ndarray) -> np.ndarray:
@@ -23,8 +32,8 @@ class LogisticRegression:
     def __init__(self, lam: float = 1.0, lr: float = 0.1,
                  n_iter: int = 500, standardise: bool = True):
         self.lam = lam
-        self.lr = lr
-        self.n_iter = n_iter
+        self.lr = lr            # unused since the switch to L-BFGS; kept for old calls
+        self.n_iter = n_iter    # max L-BFGS iterations
         self.standardise = standardise
         self.w = None
         self.b = 0.0
@@ -43,18 +52,11 @@ class LogisticRegression:
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "LogisticRegression":
         X = self._prep(X, fit=True)
-        n, d = X.shape
-        self.w = np.zeros(d)
-        self.b = 0.0
-        y = np.asarray(y, dtype=float)
-        for _ in range(self.n_iter):
-            z = X @ self.w + self.b
-            p = _sigmoid(z)
-            err = p - y
-            grad_w = X.T @ err / n + self.lam * self.w / n
-            grad_b = float(np.mean(err))
-            self.w -= self.lr * grad_w
-            self.b -= self.lr * grad_b
+        model = _SkLogisticRegression(C=1.0 / self.lam, solver="lbfgs",
+                                      max_iter=self.n_iter)
+        model.fit(X, np.asarray(y, dtype=int))
+        self.w = model.coef_.ravel()
+        self.b = float(model.intercept_[0])
         return self
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
