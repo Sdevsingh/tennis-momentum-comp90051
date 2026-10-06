@@ -6,11 +6,17 @@ of full passes over ~1.5M rows. Only the learner comes from the library --
 cross-validation, tuning and metrics stay hand-written (cross_validation.py,
 nested_cv.py, metrics.py); nothing here uses sklearn's CV or metrics.
 
-Same objective as the original gradient-descent version:
-    mean log-loss + lam / (2n) * ||w||^2   (intercept not penalised)
-which is sklearn's  C * sum(log-loss) + ||w||^2 / 2  with C = 1 / lam.
+Objective (on standardised features, intercept not penalised):
+    mean log-loss + lam / 2 * ||w||^2
+which is sklearn's  C * sum(log-loss) + ||w||^2 / 2  with C = 1 / (lam * n).
+The penalty is per mean loss, so lam means the same thing at any n. (The
+original version divided it by n, so with ~1e5-1e6 rows every lam on the grid
+gave the same, effectively unregularised, model.)
+
 Tunable hyperparameter: L2 strength `lam` (the brief needs at least one,
-with the middle grid value usually chosen).
+with the middle grid value usually chosen). Grid chosen from a scan on 4 of
+exp1's per-tour outer folds: held-out log-loss is best at lam 1e-3 to 1e-2
+and clearly worse at 0.1.
 """
 from __future__ import annotations
 
@@ -29,7 +35,7 @@ def _sigmoid(z: np.ndarray) -> np.ndarray:
 
 
 class LogisticRegression:
-    def __init__(self, lam: float = 1.0, lr: float = 0.1,
+    def __init__(self, lam: float = 0.01, lr: float = 0.1,
                  n_iter: int = 500, standardise: bool = True):
         self.lam = lam
         self.lr = lr            # unused since the switch to L-BFGS; kept for old calls
@@ -52,7 +58,7 @@ class LogisticRegression:
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "LogisticRegression":
         X = self._prep(X, fit=True)
-        model = _SkLogisticRegression(C=1.0 / self.lam, solver="lbfgs",
+        model = _SkLogisticRegression(C=1.0 / (self.lam * len(X)), solver="lbfgs",
                                       max_iter=self.n_iter)
         model.fit(X, np.asarray(y, dtype=int))
         self.w = model.coef_.ravel()
@@ -65,7 +71,7 @@ class LogisticRegression:
 
 
 # Hyperparameter grid, centred so the middle value should win most often.
-PARAM_GRID = {"lam": [0.1, 1.0, 10.0]}
+PARAM_GRID = {"lam": [0.001, 0.01, 0.1]}
 
 
 def make_model(**params) -> LogisticRegression:
