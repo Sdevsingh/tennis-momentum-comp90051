@@ -107,6 +107,9 @@ def build_point_table(raw_dir: Path = RAW_DIR) -> pd.DataFrame:
             frames.append(df)
 
     table = pd.concat(frames, ignore_index=True)
+    # point_no is read as int in some files and text in others ('0X'/'0Y'
+    # rows); keep it text so the table can be saved to parquet.
+    table["point_no"] = table["point_no"].astype(str)
     table["p1_won"] = (table["point_winner"] == 1).astype(int)
     table["server_won"] = (table["point_winner"] == table["point_server"]).astype(int)
 
