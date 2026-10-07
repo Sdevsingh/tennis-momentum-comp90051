@@ -1,83 +1,191 @@
 """Complex model: Relational Recurrent Neural Network (Santoro et al., 2018).
 
-Paper: Santoro, Faulkner, Raposo, Rae, Chrzanowski, Weber, Wierstra,
-Vinyals, Pascanu, Lillicrap. "Relational Recurrent Neural Networks."
-NeurIPS 2018.  https://arxiv.org/abs/1806.01822
+Paper: Santoro, Faulkner, Raposo, Rae, Chrzanowski, Weber, Wierstra, Vinyals,
+Pascanu, Lillicrap. "Relational Recurrent Neural Networks." NeurIPS 2018.
+https://arxiv.org/abs/1806.01822
 
 WHY IT FITS THE PROJECT
------------------------
-A standard LSTM compresses the past into a single hidden vector. The Relational
-Memory Core (RMC) instead keeps a *matrix* of memory slots and lets them
-interact through multi-head self-attention at every step, so the model can
-represent relations between separate past events. For tennis momentum this is
-exactly the hypothesis class of interest: "does what happened several points
-ago interact with the current state to shift the next outcome?" Its memory
-slots also give an interpretability handle (how attention weights depend on how
-far back a point is), which we use in the discussion.
+A standard LSTM (which the subject covers) squeezes the past into one hidden
+vector. The Relational Memory Core (RMC) keeps a MATRIX of memory slots and, at
+each step, lets them interact through multi-head self-attention before a gated
+update. It reads the RAW point sequence (src/sequences.py), not the engineered
+features, so it can discover order-dependent "momentum" structure the hand-built
+features never encode. That is exactly the research question.
 
-WHY IT WAS NOT TAUGHT IN CLASS (state this in the literature review)
--------------------------------------------------------------------
-COMP90051 covers standard recurrent architectures (RNN/LSTM) but not the
-Relational Memory Core, whose defining component — self-attention *among memory
-slots* — is a post-2017 development outside the syllabus.
+WHY IT WAS NOT TAUGHT IN CLASS (for the literature review)
+The syllabus covers standard RNN/LSTM; the RMC's defining component -- self
+attention AMONG memory slots -- is a post-2017 development outside it.
 
-INPUT
------
-Unlike the other two models, the RMC reads the RAW SEQUENCE of recent points
-(e.g. one-hot of {who won, who served, coarse score} for the last H points),
-not the hand-crafted features. This lets us ask whether it recovers momentum
-structure the hand-crafted features miss.
+INTERFACE
+Matches the other models: fit(X, y) / predict_proba(X). X is the flat sequence
+matrix from src/sequences.build_sequence_matrix: the first RNN_HISTORY *
+RNN_STEP_FEATURES columns are the flattened (time, features) sequence, the rest
+are static context. The wrapper reshapes internally, so the from-scratch nested
+CV (nested_cv.py) tunes and evaluates it exactly like the others.
 
-Tunable hyperparameter: memory size / number of slots (centred grid). Others
-(heads, learning rate) can be added but keep the count small.
+HYPERPARAMETER (2.f): mem_slots, the number of memory slots, grid {2, 4, 8}
+(middle = 4). More slots = more relational capacity.
 
-IMPLEMENTATION NOTES
---------------------
-Implement in PyTorch. The RMC can be written directly, or a reference
-implementation adapted (cite it). Keep the model small: the momentum signal is
-weak and the dataset, while large, has a low-information target, so a big
-network will overfit. Wrap training so .fit / .predict_proba match the shared
-interface used by nested_cv.py. Early stopping on an inner validation slice is
-fine; "loss vs epochs" must NOT be presented as a result in the report.
+COMPUTE: a net inside nested CV is expensive, so fit() trains on at most
+RNN_MAX_TRAIN windowed points (the brief allows a subset for CV/tuning), with a
+small net, few epochs and early stopping on an internal split. We never report
+loss-vs-epochs (2.g forbids it); epochs are only a training detail.
 """
 from __future__ import annotations
 
 import numpy as np
 
+from ..config import (RNN_HISTORY, RNN_STEP_FEATURES, RNN_MAX_TRAIN,
+                      RNN_EPOCHS, RNN_BATCH, RNN_LR, SEED)
+
+try:
+    import torch
+    import torch.nn as nn
+    _TORCH = True
+except Exception:                                    # torch optional at import
+    _TORCH = False
+
+
+if _TORCH:
+    class _RMC(nn.Module):
+        """A compact Relational Memory Core + a linear read-out to one logit."""
+
+        def __init__(self, d_step, n_static, mem_slots=4, head_size=16, n_heads=2):
+            super().__init__()
+            self.mem_slots = mem_slots
+            self.mem_size = head_size * n_heads       # size of each slot
+            self.n_heads = n_heads
+
+            self.in_proj = nn.Linear(d_step, self.mem_size)
+            self.attn = nn.MultiheadAttention(self.mem_size, n_heads, batch_first=True)
+            self.norm1 = nn.LayerNorm(self.mem_size)
+            self.norm2 = nn.LayerNorm(self.mem_size)
+            self.mlp = nn.Sequential(nn.Linear(self.mem_size, self.mem_size),
+                                     nn.ReLU(), nn.Linear(self.mem_size, self.mem_size))
+            # LSTM-style input/forget gates (Santoro et al. gated update)
+            self.gate = nn.Linear(2 * self.mem_size, 2 * self.mem_size)
+            self.mem0 = nn.Parameter(torch.zeros(mem_slots, self.mem_size))
+            self.head = nn.Linear(mem_slots * self.mem_size + n_static, 1)
+
+        def forward(self, seq, static):
+            # seq: (B, T, d_step); static: (B, n_static)
+            b, t, _ = seq.shape
+            x = self.in_proj(seq)                      # (B, T, mem_size)
+            M = self.mem0.unsqueeze(0).expand(b, -1, -1).contiguous()
+            for ti in range(t):
+                xt = x[:, ti:ti + 1, :]                 # (B, 1, mem_size)
+                rows = torch.cat([M, xt], dim=1)        # attend over slots + input
+                a, _ = self.attn(M, rows, rows)         # queries = slots
+                M_hat = self.norm1(M + a)
+                M_hat = self.norm2(M_hat + self.mlp(M_hat))
+                # gated update, input xt broadcast across slots
+                g = self.gate(torch.cat([M, xt.expand(-1, self.mem_slots, -1)], dim=-1))
+                i_gate, f_gate = g.chunk(2, dim=-1)
+                M = torch.sigmoid(f_gate) * M + torch.sigmoid(i_gate) * torch.tanh(M_hat)
+            flat = torch.cat([M.reshape(b, -1), static], dim=1)
+            return self.head(flat).squeeze(1)          # logit
+
 
 class RelationalRNN:
     def __init__(self, mem_slots: int = 4, head_size: int = 16, n_heads: int = 2,
-                 n_epochs: int = 20, lr: float = 1e-3, history: int = 20,
-                 seed: int = 51):
+                 history: int = RNN_HISTORY, d_step: int = RNN_STEP_FEATURES,
+                 n_epochs: int = RNN_EPOCHS, lr: float = RNN_LR,
+                 batch: int = RNN_BATCH, max_train: int = RNN_MAX_TRAIN,
+                 seed: int = SEED):
+        if not _TORCH:
+            raise ImportError("PyTorch is required for the Relational RNN "
+                              "(pip install torch).")
         self.mem_slots = mem_slots
         self.head_size = head_size
         self.n_heads = n_heads
+        self.history = history
+        self.d_step = d_step
         self.n_epochs = n_epochs
         self.lr = lr
-        self.history = history
+        self.batch = batch
+        self.max_train = max_train
         self.seed = seed
         self._net = None
+        self._n_static = None
 
-    def fit(self, X_seq, y):
-        """X_seq: (n, history, feat) sequence tensor; y: (n,) in {0,1}.
+    def _split(self, X):
+        """Flat X -> (sequence (N,T,d_step), static (N,n_static))."""
+        cut = self.history * self.d_step
+        seq = X[:, :cut].reshape(-1, self.history, self.d_step)
+        static = X[:, cut:]
+        return seq.astype(np.float32), static.astype(np.float32)
 
-        TODO(team):
-          1. Build the RMC (memory matrix + multi-head self-attention update +
-             gating), then a linear head to a single logit.
-          2. Train with BCE-with-logits, Adam, early stopping on an inner split.
-          3. Store the trained net on self._net.
-        Note: experiments pass sequence tensors to this model, and the flat
-        feature matrix to the other two. exp runners handle the difference.
-        """
-        raise NotImplementedError("Implement the RMC (see docstring + paper).")
+    def fit(self, X, y):
+        torch.manual_seed(self.seed)
+        rng = np.random.default_rng(self.seed)
+        X = np.asarray(X, dtype=np.float32)
+        y = np.asarray(y, dtype=np.float32)
+        # subsample for tractable training inside nested CV
+        if len(X) > self.max_train:
+            idx = rng.choice(len(X), self.max_train, replace=False)
+            X, y = X[idx], y[idx]
+        seq, static = self._split(X)
+        self._n_static = static.shape[1]
 
-    def predict_proba(self, X_seq) -> np.ndarray:
+        # internal train/val split for early stopping
+        n = len(seq)
+        perm = rng.permutation(n)
+        n_val = max(1, int(0.1 * n))
+        val, tr = perm[:n_val], perm[n_val:]
+
+        dev = torch.device("cpu")
+        self._net = _RMC(self.d_step, self._n_static, self.mem_slots,
+                         self.head_size, self.n_heads).to(dev)
+        opt = torch.optim.Adam(self._net.parameters(), lr=self.lr)
+        loss_fn = nn.BCEWithLogitsLoss()
+
+        def batches(ix):
+            for s in range(0, len(ix), self.batch):
+                b = ix[s:s + self.batch]
+                yield (torch.from_numpy(seq[b]), torch.from_numpy(static[b]),
+                       torch.from_numpy(y[b]))
+
+        best_val, best_state, patience = float("inf"), None, 0
+        for _ in range(self.n_epochs):
+            self._net.train()
+            for sb, stb, yb in batches(rng.permutation(tr)):
+                opt.zero_grad()
+                loss = loss_fn(self._net(sb, stb), yb)
+                loss.backward()
+                opt.step()
+            # validation loss for early stopping (NOT reported as a result)
+            self._net.eval()
+            with torch.no_grad():
+                vl = loss_fn(self._net(torch.from_numpy(seq[val]),
+                                       torch.from_numpy(static[val])),
+                             torch.from_numpy(y[val])).item()
+            if vl < best_val - 1e-4:
+                best_val, best_state, patience = vl, {
+                    k: v.clone() for k, v in self._net.state_dict().items()}, 0
+            else:
+                patience += 1
+                if patience >= 2:
+                    break
+        if best_state is not None:
+            self._net.load_state_dict(best_state)
+        return self
+
+    def predict_proba(self, X) -> np.ndarray:
         if self._net is None:
             raise RuntimeError("Model not fitted.")
-        raise NotImplementedError
+        X = np.asarray(X, dtype=np.float32)
+        seq, static = self._split(X)
+        self._net.eval()
+        out = np.empty(len(seq), dtype=np.float32)
+        with torch.no_grad():
+            for s in range(0, len(seq), self.batch):
+                sb = torch.from_numpy(seq[s:s + self.batch])
+                stb = torch.from_numpy(static[s:s + self.batch])
+                out[s:s + self.batch] = torch.sigmoid(self._net(sb, stb)).numpy()
+        return out
 
 
-# Centred so the middle memory size should win most often.
+# Centred so the middle memory size should win most often (2.f requirement).
 PARAM_GRID = {"mem_slots": [2, 4, 8]}
 
 

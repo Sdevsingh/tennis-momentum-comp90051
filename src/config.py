@@ -80,3 +80,17 @@ SERVE_AVG_ALPHA = 0.0005  # running tour-average serve points won
 
 # Positive-control planted momentum sizes (bump to next-point win prob after a streak).
 PLANTED_DELTAS = [0.0, 0.02, 0.05, 0.10]
+
+# --- Relational RNN (complex model) ---
+# Length of the raw point sequence fed to the RNN: the last RNN_HISTORY points
+# before the one being predicted (zero-padded at the start of a match, never
+# crossing a match boundary). This is the "60 points of raw history" input.
+RNN_HISTORY = 60
+# Per-point step features in the sequence (see src/sequences.py). Keep in sync.
+RNN_STEP_FEATURES = 5
+# Train on at most this many windowed points per fit (the brief allows using a
+# subset for CV/tuning; a neural net inside nested CV is otherwise too slow).
+RNN_MAX_TRAIN = 40_000
+RNN_EPOCHS = 8
+RNN_BATCH = 512
+RNN_LR = 1e-3

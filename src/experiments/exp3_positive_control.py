@@ -23,17 +23,20 @@ import pandas as pd
 
 from ..config import RESULTS_DIR, PLANTED_DELTAS, SEED, N_OUTER_REPEATS
 from ..features import build_features, FEATURE_COLUMNS
+from ..sequences import build_sequence_matrix
 from ..cross_validation import kfold_match_splits
 from ..nested_cv import nested_cv
-from ..models import logistic_regression, gradient_boosting
-# from ..models import relational_rnn  # enable when ready
+from ..models import logistic_regression, gradient_boosting, relational_rnn
 
 
 MODELS = {
     "logreg": (logistic_regression.make_model, logistic_regression.PARAM_GRID),
     "gboost": (gradient_boosting.make_model, gradient_boosting.PARAM_GRID),
-    # "rmc":    (relational_rnn.make_model, relational_rnn.PARAM_GRID),
+    "rmc":    (relational_rnn.make_model, relational_rnn.PARAM_GRID),
 }
+
+# Models whose input is the raw point sequence rather than the tabular features.
+SEQUENCE_MODELS = {"rmc"}
 
 
 def simulate_matches(n_matches: int = 400, points_per_match: int = 150,
@@ -85,13 +88,15 @@ def main() -> None:
     for delta in PLANTED_DELTAS:
         sim = simulate_matches(delta=delta)
         feats = build_features(sim, player_won_col="p1_won").fillna(0.0)
-        X = feats[FEATURE_COLUMNS].to_numpy()
+        X_tab = feats[FEATURE_COLUMNS].to_numpy()
+        X_seq = build_sequence_matrix(feats)          # raw sequence for the RNN
         y = feats["p1_won"].to_numpy()
         match_ids = feats["match_id"].to_numpy()
         # Synthetic data has no real time axis -> plain k-fold over matches.
         splits = kfold_match_splits(list(dict.fromkeys(match_ids.tolist())),
                                     k=max(10, N_OUTER_REPEATS))
         for name, (make, grid) in MODELS.items():
+            X = X_seq if name in SEQUENCE_MODELS else X_tab
             res = nested_cv(make, grid, X, y, match_ids, splits,
                             score_names=("log_loss", "auc"))
             sensitivity[name][delta] = res["summary"]
