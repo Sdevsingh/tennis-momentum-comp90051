@@ -267,18 +267,95 @@ def breaks_so_far(match: pd.DataFrame) -> pd.DataFrame:
     return match
 
 
-def pressure_features(match: pd.DataFrame) -> pd.DataFrame:
-    """Score-context / pressure indicators.
+def score_context(match: pd.DataFrame) -> pd.DataFrame:
+    """Reconstruct the running score before each point, and derive the
+    pressure / game-situation features from it.
 
-    TODO(team): derive break point, set point, deciding set, and game/set
-    score differential from the score columns in the Sackmann file. These are
-    control variables: an apparent momentum effect that vanishes once pressure
-    is included was really a pressure effect.
+    One forward pass over the match. Everything recorded for a point uses only
+    points strictly BEFORE it (plus the current point's server/set/game, which
+    are known before the outcome), so nothing leaks the label.
+
+    Game/set bookkeeping:
+      - a game is won by the winner of its last point; it is credited when the
+        (set_no, game_no) key changes, so the game in progress never counts;
+      - a set is won by whoever has more games when set_no changes (a set is
+        always 6-x, 7-5 or 7-6, so the winner always leads on games);
+      - a tiebreak is a game in which both players serve.
+
+    Within-game points give standard tennis pressure flags (deuce/ad handled by
+    the "win by 2" test):
+      - is_break_point  the receiver can take the server's game on this point;
+      - is_game_point   the server can hold on this point;
+      - is_set_point    either of those, when that game also decides the set
+        (approx: a leader on >=5 games winning by >=1; ignores 7-6 set points).
+
+    Adds the pressure flags (is_break_point, is_set_point, score_diff) plus a
+    set of score counters, all POINT-scope.
     """
-    # Placeholder columns so downstream shape is stable; replace with real logic.
-    match["is_break_point"] = 0
-    match["is_set_point"] = 0
-    match["score_diff"] = 0
+    servers = match["point_server"].to_numpy()
+    winners = match["point_winner"].to_numpy()
+    set_no = match["set_no"].to_numpy()
+    game_no = match["game_no"].to_numpy()
+    n = len(match)
+
+    # columns to fill
+    cols = {c: np.zeros(n, dtype=int) for c in (
+        "is_break_point", "is_set_point", "is_game_point", "is_tiebreak",
+        "score_diff", "set_diff", "point_idx_match", "cur_set_no",
+        "games_done_in_set", "points_in_game", "p1_games_set", "p2_games_set",
+        "p1_sets_won", "p2_sets_won", "server_pts_game", "receiver_pts_game")}
+
+    pts = {1: 0, 2: 0}                 # points won in the current game
+    games = {1: 0, 2: 0}              # games won in the current set
+    sets = {1: 0, 2: 0}              # sets won in the match
+    servers_in_game: set = set()
+
+    for i in range(n):
+        if i:
+            if (set_no[i], game_no[i]) != (set_no[i - 1], game_no[i - 1]):
+                games[int(winners[i - 1])] += 1       # credit completed game
+                pts = {1: 0, 2: 0}
+                servers_in_game = set()
+            if set_no[i] != set_no[i - 1]:
+                set_winner = 1 if games[1] > games[2] else 2
+                sets[set_winner] += 1                  # credit completed set
+                games = {1: 0, 2: 0}
+
+        s = int(servers[i])
+        r = 2 if s == 1 else 1
+        sp, rp = pts[s], pts[r]
+        tiebreak = len(servers_in_game | {s}) > 1
+
+        # one-point-away tests (win by 2, min 4 points), skipped in a tiebreak
+        recv_wins = (rp + 1 >= 4) and (rp + 1 - sp >= 2)
+        serv_wins = (sp + 1 >= 4) and (sp + 1 - rp >= 2)
+        bp = int((not tiebreak) and recv_wins)
+        gp = int((not tiebreak) and serv_wins)
+        sp_server = gp and games[s] >= 5 and games[s] - games[r] >= 1
+        sp_recv = bp and games[r] >= 5 and games[r] - games[s] >= 1
+
+        cols["is_break_point"][i] = bp
+        cols["is_game_point"][i] = gp
+        cols["is_set_point"][i] = int(bool(sp_server or sp_recv))
+        cols["is_tiebreak"][i] = int(tiebreak)
+        cols["score_diff"][i] = games[1] - games[2]       # p1 - p2 games, this set
+        cols["set_diff"][i] = sets[1] - sets[2]
+        cols["point_idx_match"][i] = i
+        cols["cur_set_no"][i] = int(set_no[i])
+        cols["games_done_in_set"][i] = games[1] + games[2]
+        cols["points_in_game"][i] = sp + rp
+        cols["p1_games_set"][i] = games[1]
+        cols["p2_games_set"][i] = games[2]
+        cols["p1_sets_won"][i] = sets[1]
+        cols["p2_sets_won"][i] = sets[2]
+        cols["server_pts_game"][i] = sp
+        cols["receiver_pts_game"][i] = rp
+
+        servers_in_game.add(s)
+        pts[int(winners[i])] += 1
+
+    for c, v in cols.items():
+        match[c] = v
     return match
 
 
@@ -328,7 +405,7 @@ def build_features(points: pd.DataFrame, player_won_col: str = "p1_won") -> pd.D
         match = serve_bayes(match)
         match = breaks_so_far(match)
         match = court_side(match)
-        match = pressure_features(match)
+        match = score_context(match)
         match = surprise_feature(match, player_won_col, expected_col)
         parts.append(match)
     out = pd.concat(parts, ignore_index=True)
@@ -370,6 +447,12 @@ POINT_FEATURES = (
     + ["p1_breaks_won", "p1_breaks_conceded"]
     + ["is_break_point", "is_set_point", "score_diff", "server_is_p1",
        "serve_from_ad_court"]
+    # score-context counters (score_context): running game/set score before
+    # each point, plus game-situation pressure flags.
+    + ["is_game_point", "is_tiebreak", "set_diff", "point_idx_match",
+       "cur_set_no", "games_done_in_set", "points_in_game",
+       "p1_games_set", "p2_games_set", "p1_sets_won", "p2_sets_won",
+       "server_pts_game", "receiver_pts_game"]
 )
 
 FEATURE_SCOPE: dict[str, FeatureScope] = {
