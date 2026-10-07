@@ -27,6 +27,7 @@ from .config import (WINDOW_SIZES, DECAY_RATES, SERVE_GAME_WINDOWS, SERVE_PRIOR_
                      SERVE_BAYES_PRIOR_VAR_PCT, SERVE_BAYES_PRIOR_N_OFFSET)
 from .player_features import (add_player_features, PLAYER_MATCH_FEATURES,
                               PLAYER_SERVER_VIEW_FEATURES)
+from .tennis_rules import is_tiebreak as _is_tiebreak
 
 
 def _prev_only(series: pd.Series) -> pd.Series:
@@ -38,11 +39,13 @@ def rolling_winrate(match: pd.DataFrame, player_won_col: str) -> pd.DataFrame:
     """Rolling win rate over the last W points, for several W.
 
     Computed from the point of view of player 1 (symmetric for player 2).
+    0.5 on a match's first point (no history yet), not NaN: the experiments
+    fillna(0), which would read as "lost every point".
     """
     won = _prev_only(match[player_won_col])
     for w in WINDOW_SIZES:
         match[f"winrate_w{w}"] = (
-            won.rolling(window=w, min_periods=1).mean()
+            won.rolling(window=w, min_periods=1).mean().fillna(0.5)
         )
     return match
 
@@ -57,7 +60,7 @@ def ewma_winrate(match: pd.DataFrame, player_won_col: str) -> pd.DataFrame:
     won = _prev_only(match[player_won_col])
     for d in DECAY_RATES:
         # alpha relates to decay: larger d -> slower decay -> longer memory.
-        match[f"ewma_d{d}"] = won.ewm(alpha=1 - d, min_periods=1).mean()
+        match[f"ewma_d{d}"] = won.ewm(alpha=1 - d, min_periods=1).mean().fillna(0.5)
     return match
 
 
@@ -280,7 +283,8 @@ def score_context(match: pd.DataFrame) -> pd.DataFrame:
         (set_no, game_no) key changes, so the game in progress never counts;
       - a set is won by whoever has more games when set_no changes (a set is
         always 6-x, 7-5 or 7-6, so the winner always leads on games);
-      - a tiebreak is a game in which both players serve.
+      - a tiebreak is decided from the games score and the event's rules
+        (src/tennis_rules.py), so it is known before its first point.
 
     Within-game points give standard tennis pressure flags (deuce/ad handled by
     the "win by 2" test):
@@ -308,14 +312,13 @@ def score_context(match: pd.DataFrame) -> pd.DataFrame:
     pts = {1: 0, 2: 0}                 # points won in the current game
     games = {1: 0, 2: 0}              # games won in the current set
     sets = {1: 0, 2: 0}              # sets won in the match
-    servers_in_game: set = set()
+    match_id = str(match["match_id"].iloc[0])
 
     for i in range(n):
         if i:
             if (set_no[i], game_no[i]) != (set_no[i - 1], game_no[i - 1]):
                 games[int(winners[i - 1])] += 1       # credit completed game
                 pts = {1: 0, 2: 0}
-                servers_in_game = set()
             if set_no[i] != set_no[i - 1]:
                 set_winner = 1 if games[1] > games[2] else 2
                 sets[set_winner] += 1                  # credit completed set
@@ -324,7 +327,7 @@ def score_context(match: pd.DataFrame) -> pd.DataFrame:
         s = int(servers[i])
         r = 2 if s == 1 else 1
         sp, rp = pts[s], pts[r]
-        tiebreak = len(servers_in_game | {s}) > 1
+        tiebreak = _is_tiebreak(match_id, set_no[i], games[1], games[2])
 
         # one-point-away tests (win by 2, min 4 points), skipped in a tiebreak
         recv_wins = (rp + 1 >= 4) and (rp + 1 - sp >= 2)
@@ -351,7 +354,6 @@ def score_context(match: pd.DataFrame) -> pd.DataFrame:
         cols["server_pts_game"][i] = sp
         cols["receiver_pts_game"][i] = rp
 
-        servers_in_game.add(s)
         pts[int(winners[i])] += 1
 
     for c, v in cols.items():
@@ -379,7 +381,7 @@ def surprise_feature(match: pd.DataFrame, player_won_col: str,
         match["surprise_ewma"] = 0.0
         return match
     resid = _prev_only(match[player_won_col] - match[expected_col])
-    match["surprise_ewma"] = resid.ewm(alpha=0.15, min_periods=1).mean()
+    match["surprise_ewma"] = resid.ewm(alpha=0.15, min_periods=1).mean().fillna(0.0)
     return match
 
 
