@@ -29,20 +29,25 @@ def memory_horizon_figure():
     if not path.exists():
         print(f"  [skip] {path.name} not found — run exp2 first.")
         return
-    curve = json.loads(path.read_text())
-    hs = sorted(int(h) for h in curve)
-    means = [curve[str(h)]["log_loss"]["mean"] for h in hs]
-    ses = [curve[str(h)]["log_loss"]["se"] for h in hs]
-    # Gain over the zero-history baseline (baseline minus current log-loss).
-    base = means[0]
-    gain = [base - m for m in means]
+    data = json.loads(path.read_text())
+    # New format: {model: {h: summary}}. Fall back to the old flat {h: summary}.
+    curves = data if all(isinstance(v, dict) and "log_loss" not in v
+                         for v in data.values()) else {"model": data}
 
-    fig, ax = plt.subplots(figsize=(3.3, 2.4))
-    ax.errorbar(hs, gain, yerr=ses, marker="o", capsize=3)
+    fig, ax = plt.subplots(figsize=(3.6, 2.6))
+    for name, curve in curves.items():
+        hs = sorted(int(h) for h in curve)
+        means = [curve[str(h)]["log_loss"]["mean"] for h in hs]
+        ses = [curve[str(h)]["log_loss"]["se"] for h in hs]
+        base = means[0]  # gain over the zero-history baseline
+        gain = [base - m for m in means]
+        ax.errorbar(hs, gain, yerr=ses, marker="o", capsize=3, label=name)
     ax.axhline(0, color="grey", lw=0.8, ls="--")
     ax.set_xlabel("History length (points)")
     ax.set_ylabel("Log-loss gain vs. H=0")
     ax.set_title("Memory horizon")
+    if len(curves) > 1:
+        ax.legend(fontsize=7)
     fig.tight_layout()
     fig.savefig(FIGDIR / "memory_horizon.pdf")
     print(f"  wrote {FIGDIR / 'memory_horizon.pdf'}")
@@ -53,13 +58,17 @@ def positive_control_figure():
     if not path.exists():
         print(f"  [skip] {path.name} not found — run exp3 first.")
         return
-    sens = json.loads(path.read_text())
-    deltas = sorted(float(d) for d in sens)
-    aucs = [sens[str(d)]["auc"]["mean"] for d in deltas]
-    ses = [sens[str(d)]["auc"]["se"] for d in deltas]
+    data = json.loads(path.read_text())
+    # New format: {model: {delta: summary}}. Fall back to old flat {delta: summary}.
+    series = data if all(isinstance(v, dict) and "auc" not in v
+                         for v in data.values()) else {"model": data}
 
-    fig, ax = plt.subplots(figsize=(3.3, 2.4))
-    ax.errorbar(deltas, aucs, yerr=ses, marker="s", capsize=3)
+    fig, ax = plt.subplots(figsize=(3.6, 2.6))
+    for name, sens in series.items():
+        deltas = sorted(float(d) for d in sens)
+        aucs = [sens[str(d) if str(d) in sens else f"{d}"]["auc"]["mean"] for d in deltas]
+        ses = [sens[str(d) if str(d) in sens else f"{d}"]["auc"]["se"] for d in deltas]
+        ax.errorbar(deltas, aucs, yerr=ses, marker="s", capsize=3, label=name)
     ax.axhline(0.5, color="grey", lw=0.8, ls="--", label="chance")
     ax.set_xlabel(r"Planted momentum $\delta$")
     ax.set_ylabel("AUC")

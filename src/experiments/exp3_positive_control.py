@@ -25,7 +25,15 @@ from ..config import RESULTS_DIR, PLANTED_DELTAS, SEED, N_OUTER_REPEATS
 from ..features import build_features, FEATURE_COLUMNS
 from ..cross_validation import kfold_match_splits
 from ..nested_cv import nested_cv
-from ..models import logistic_regression
+from ..models import logistic_regression, gradient_boosting
+# from ..models import relational_rnn  # enable when ready
+
+
+MODELS = {
+    "logreg": (logistic_regression.make_model, logistic_regression.PARAM_GRID),
+    "gboost": (gradient_boosting.make_model, gradient_boosting.PARAM_GRID),
+    # "rmc":    (relational_rnn.make_model, relational_rnn.PARAM_GRID),
+}
 
 
 def simulate_matches(n_matches: int = 400, points_per_match: int = 150,
@@ -71,7 +79,9 @@ def simulate_matches(n_matches: int = 400, points_per_match: int = 150,
 
 
 def main() -> None:
-    sensitivity = {}
+    # One pass of simulation per delta (shared across models for a fair
+    # comparison), then nested CV for every model on the same data.
+    sensitivity = {name: {} for name in MODELS}
     for delta in PLANTED_DELTAS:
         sim = simulate_matches(delta=delta)
         feats = build_features(sim, player_won_col="p1_won").fillna(0.0)
@@ -81,19 +91,19 @@ def main() -> None:
         # Synthetic data has no real time axis -> plain k-fold over matches.
         splits = kfold_match_splits(list(dict.fromkeys(match_ids.tolist())),
                                     k=max(10, N_OUTER_REPEATS))
-        res = nested_cv(logistic_regression.make_model,
-                        logistic_regression.PARAM_GRID,
-                        X, y, match_ids, splits,
-                        score_names=("log_loss", "auc"))
-        sensitivity[delta] = res["summary"]
-        s = res["summary"]
-        print(f"  delta={delta:.2f}: auc={s['auc']['mean']:.4f}±{s['auc']['se']:.4f}")
+        for name, (make, grid) in MODELS.items():
+            res = nested_cv(make, grid, X, y, match_ids, splits,
+                            score_names=("log_loss", "auc"))
+            sensitivity[name][delta] = res["summary"]
+            s = res["summary"]
+            print(f"  [{name}] delta={delta:.2f}: "
+                  f"auc={s['auc']['mean']:.4f}±{s['auc']['se']:.4f}", flush=True)
 
     (RESULTS_DIR / "exp3_positive_control.json").write_text(
         json.dumps(sensitivity, indent=2))
     print(f"\nWrote {RESULTS_DIR / 'exp3_positive_control.json'}")
-    print("The smallest delta whose AUC clears the delta=0 error bar is your "
-          "detection floor — report it next to the real-data effect size.")
+    print("Per model, the smallest delta whose AUC clears the delta=0 error bar "
+          "is the detection floor — report it next to the real-data effect size.")
 
 
 if __name__ == "__main__":
