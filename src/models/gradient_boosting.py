@@ -48,7 +48,13 @@ class GradientBoosting:
         return self._impl.predict_proba(np.asarray(X, dtype=float))[:, 1]
 
 
-PARAM_GRID = {"n_estimators": [100, 200, 400]}
+# Two tuned hyperparameters (2.f), both strongly affecting results and cheap for
+# LightGBM: number of trees and learning rate. Grids centred so the middle value
+# should win most often; 3 x 3 = 9 combinations keeps nested CV tractable.
+PARAM_GRID = {
+    "n_estimators": [100, 200, 400],
+    "learning_rate": [0.03, 0.1, 0.3],
+}
 
 
 def make_model(**params) -> GradientBoosting:
