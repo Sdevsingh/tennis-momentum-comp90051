@@ -24,7 +24,8 @@ import numpy as np
 import pandas as pd
 
 from .config import (WINDOW_SIZES, DECAY_RATES, SERVE_GAME_WINDOWS, SERVE_PRIOR_POINTS,
-                     SERVE_BAYES_PRIOR_VAR_PCT, SERVE_BAYES_PRIOR_N_OFFSET)
+                     SERVE_BAYES_PRIOR_VAR_PCT, SERVE_BAYES_PRIOR_N_OFFSET,
+                     RALLY_NEUTRAL_LEN, RALLY_WINDOW, LONG_RALLY_SHOTS)
 from .player_features import (add_player_features, PLAYER_MATCH_FEATURES,
                               PLAYER_SERVER_VIEW_FEATURES)
 from .tennis_rules import is_tiebreak as _is_tiebreak
@@ -234,6 +235,117 @@ def court_side(match: pd.DataFrame) -> pd.DataFrame:
     return match
 
 
+def rally_features(match: pd.DataFrame) -> pd.DataFrame:
+    """Rally-length features, from points BEFORE the current one only.
+
+    A point's own rally length is only known once it has been played, so it
+    is never a feature for that point. Rally length is missing for ~35% of
+    points (no Slam recorded it in 2012-2015, and some matches are
+    untracked); missing rallies are skipped in the averages, and a value
+    with nothing to average is RALLY_NEUTRAL_LEN (or 0.5 for the win %).
+
+    Adds:
+      prev_rally_len         shots in the previous point's rally
+      rally_len_avg10        mean rally length over the last RALLY_WINDOW points
+      match_rally_avg        mean rally length so far in the match
+      p1_long_rally_win_pct  player 1's share of long rallies (>= LONG_RALLY_SHOTS
+                             shots) won so far, smoothed: (wins + 1) / (long + 2)
+      rally_data_share       share of earlier points with a known rally length
+    """
+    rally = match["rally"] if "rally" in match.columns else pd.Series(np.nan, index=match.index)
+    prev = _prev_only(rally.astype(float))
+    match["prev_rally_len"] = prev.fillna(RALLY_NEUTRAL_LEN)
+    match["rally_len_avg10"] = prev.rolling(RALLY_WINDOW, min_periods=1).mean().fillna(RALLY_NEUTRAL_LEN)
+    match["match_rally_avg"] = prev.expanding(min_periods=1).mean().fillna(RALLY_NEUTRAL_LEN)
+    long = (prev >= LONG_RALLY_SHOTS).to_numpy()
+    p1_won_prev = (_prev_only(match["point_winner"]) == 1).to_numpy()
+    wins, n = np.cumsum(long & p1_won_prev), np.cumsum(long)
+    match["p1_long_rally_win_pct"] = (wins + 1) / (n + 2)
+    n_earlier = np.arange(len(match))
+    match["rally_data_share"] = np.cumsum(prev.notna().to_numpy()) / np.maximum(n_earlier, 1)
+    return match
+
+
+def _match_round(match_id: str) -> int:
+    """Round from the match number: its hundreds digit (1205 / MS212 -> round 2)."""
+    return int(match_id.split("-")[-1][-3])
+
+
+def slam_rally_baseline(points: pd.DataFrame) -> pd.Series:
+    """Per match: average rally length at the same Slam in EARLIER matches.
+
+    Earlier = all previous years of that Slam, plus earlier rounds of the same
+    year (matches in the same round are concurrent, so they are excluded).
+    Only points with a known rally length count. RALLY_NEUTRAL_LEN where there
+    is no history yet (2011 round 1). Built from the matches in `points`, so a
+    subset gives a baseline from that subset only.
+    """
+    known = points[points["rally"].notna()] if "rally" in points.columns else points.iloc[:0]
+    mids = pd.Series(points["match_id"].unique())
+    key = pd.DataFrame({"match_id": mids,
+                        "slam": mids.str.split("-").str[1],
+                        "year": mids.str[:4].astype(int),
+                        "round": [_match_round(m) for m in mids]})
+    sums = known.groupby("match_id")["rally"].agg(["sum", "count"])
+    key = key.join(sums, on="match_id").fillna({"sum": 0.0, "count": 0})
+    blocks = key.groupby(["slam", "year", "round"])[["sum", "count"]].sum().sort_index()
+    # cumulative over earlier blocks only (shift excludes the match's own round)
+    cum = blocks.groupby(level="slam").cumsum().groupby(level="slam").shift(1).fillna(0)
+    base = (cum["sum"] / cum["count"].where(cum["count"] > 0)).fillna(RALLY_NEUTRAL_LEN)
+    return key.join(base.rename("baseline"), on=["slam", "year", "round"]).set_index("match_id")["baseline"]
+
+
+def server_rally_ratios(match: pd.DataFrame, baseline: float) -> pd.DataFrame:
+    """The current server's rally length on their own serve, relative to the Slam.
+
+    Averages over the server's SERVICE points only, from points before the
+    current one, each divided by `baseline` (slam_rally_baseline):
+      server_rally_ratio_last_game  their last completed service game
+      server_rally_ratio_cur_game   the current service game so far
+      server_rally_ratio_match      all their service points so far this match
+    1.0 (typical) where there is nothing to average: no known rally yet, the
+    first point of a service game, or a match without rally data. Tiebreak
+    points count toward the match average and, for the current game, only the
+    current server's own points; a tiebreak is never a "last service game".
+    """
+    servers = match["point_server"].to_numpy()
+    rally = (match["rally"] if "rally" in match.columns
+             else pd.Series(np.nan, index=match.index)).to_numpy(dtype=float)
+    keys = list(zip(match["set_no"].to_numpy(), match["game_no"].to_numpy()))
+    n = len(match)
+    out = {c: np.ones(n) for c in ("server_rally_ratio_last_game",
+                                   "server_rally_ratio_cur_game",
+                                   "server_rally_ratio_match")}
+    tot = {1: [0.0, 0], 2: [0.0, 0]}            # this match, own serve: [sum, count]
+    last = {1: None, 2: None}                    # last completed service game mean
+    cur = {1: [0.0, 0], 2: [0.0, 0]}             # current game, per server
+    game_servers: set = set()
+
+    def ratio(total, count):
+        return total / count / baseline if count else 1.0
+
+    for i in range(n):
+        if i and keys[i] != keys[i - 1]:
+            if len(game_servers) == 1:           # a completed normal service game
+                (g_s,) = game_servers
+                if cur[g_s][1]:
+                    last[g_s] = cur[g_s][0] / cur[g_s][1]
+            cur = {1: [0.0, 0], 2: [0.0, 0]}
+            game_servers = set()
+        s = int(servers[i])
+        out["server_rally_ratio_match"][i] = ratio(*tot[s])
+        out["server_rally_ratio_cur_game"][i] = ratio(*cur[s])
+        if last[s] is not None:
+            out["server_rally_ratio_last_game"][i] = last[s] / baseline
+        game_servers.add(s)
+        if not np.isnan(rally[i]):
+            tot[s][0] += rally[i]; tot[s][1] += 1
+            cur[s][0] += rally[i]; cur[s][1] += 1
+    for c, v in out.items():
+        match[c] = v
+    return match
+
+
 def breaks_so_far(match: pd.DataFrame) -> pd.DataFrame:
     """Breaks of serve won and conceded so far in the match.
 
@@ -395,9 +507,10 @@ def build_features(points: pd.DataFrame, player_won_col: str = "p1_won") -> pd.D
     # measures against their serve/return expectation.
     points = add_player_features(points)
     expected_col = "p_serve_expected" if player_won_col == "server_won" else "expected_p1_win"
+    rally_base = slam_rally_baseline(points)
 
     parts = []
-    for _, match in points.groupby("match_id", sort=False):
+    for mid, match in points.groupby("match_id", sort=False):
         match = match.copy()
         match = rolling_winrate(match, player_won_col)
         match = ewma_winrate(match, player_won_col)
@@ -407,6 +520,8 @@ def build_features(points: pd.DataFrame, player_won_col: str = "p1_won") -> pd.D
         match = serve_bayes(match)
         match = breaks_so_far(match)
         match = court_side(match)
+        match = rally_features(match)
+        match = server_rally_ratios(match, float(rally_base[mid]))
         match = score_context(match)
         match = surprise_feature(match, player_won_col, expected_col)
         parts.append(match)
@@ -449,6 +564,10 @@ POINT_FEATURES = (
     + ["p1_breaks_won", "p1_breaks_conceded"]
     + ["is_break_point", "is_set_point", "score_diff", "server_is_p1",
        "serve_from_ad_court"]
+    + ["prev_rally_len", "rally_len_avg10", "match_rally_avg",
+       "p1_long_rally_win_pct", "rally_data_share"]
+    + ["server_rally_ratio_last_game", "server_rally_ratio_cur_game",
+       "server_rally_ratio_match"]
     # score-context counters (score_context): running game/set score before
     # each point, plus game-situation pressure flags.
     + ["is_game_point", "is_tiebreak", "set_diff", "point_idx_match",
