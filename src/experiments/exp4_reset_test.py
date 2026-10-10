@@ -8,7 +8,7 @@ cutting at boundaries should not matter.
 Method: build two feature sets —
   (a) history allowed to cross game/set boundaries (as in exp1/exp2),
   (b) history reset to empty at the start of each game (and separately, set),
-then compare momentum signal (real - simulated gap, or horizon gain) between them.
+then compare momentum signal (real - shuffled gap, or horizon gain) between them.
 
 This is a strong piece of critical analysis for the discussion, but optional
 given the 4-page limit and the Oct 16 deadline. Implement only if time allows.
