@@ -41,6 +41,13 @@ SERVE_PRIOR_POINTS = 8
 SERVE_BAYES_PRIOR_VAR_PCT = 10_000.0
 SERVE_BAYES_PRIOR_N_OFFSET = 200
 
+# Rally features (features.rally_features): neutral rally length used before
+# any rally is known (the dataset's mean, 3.7 shots), the averaging window in
+# points, and what counts as a long rally.
+RALLY_NEUTRAL_LEN = 3.7
+RALLY_WINDOW = 10
+LONG_RALLY_SHOTS = 5
+
 # Outer CV: temporal repetitions (predict future from past).
 N_OUTER_REPEATS = 10
 # Inner CV for nested hyperparameter tuning.

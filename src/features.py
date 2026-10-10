@@ -24,7 +24,8 @@ import numpy as np
 import pandas as pd
 
 from .config import (WINDOW_SIZES, DECAY_RATES, SERVE_GAME_WINDOWS, SERVE_PRIOR_POINTS,
-                     SERVE_BAYES_PRIOR_VAR_PCT, SERVE_BAYES_PRIOR_N_OFFSET)
+                     SERVE_BAYES_PRIOR_VAR_PCT, SERVE_BAYES_PRIOR_N_OFFSET,
+                     RALLY_NEUTRAL_LEN, RALLY_WINDOW, LONG_RALLY_SHOTS)
 from .player_features import (add_player_features, PLAYER_MATCH_FEATURES,
                               PLAYER_SERVER_VIEW_FEATURES)
 from .tennis_rules import is_tiebreak as _is_tiebreak
@@ -234,6 +235,37 @@ def court_side(match: pd.DataFrame) -> pd.DataFrame:
     return match
 
 
+def rally_features(match: pd.DataFrame) -> pd.DataFrame:
+    """Rally-length features, from points BEFORE the current one only.
+
+    A point's own rally length is only known once it has been played, so it
+    is never a feature for that point. Rally length is missing for ~35% of
+    points (no Slam recorded it in 2012-2015, and some matches are
+    untracked); missing rallies are skipped in the averages, and a value
+    with nothing to average is RALLY_NEUTRAL_LEN (or 0.5 for the win %).
+
+    Adds:
+      prev_rally_len         shots in the previous point's rally
+      rally_len_avg10        mean rally length over the last RALLY_WINDOW points
+      match_rally_avg        mean rally length so far in the match
+      p1_long_rally_win_pct  player 1's share of long rallies (>= LONG_RALLY_SHOTS
+                             shots) won so far, smoothed: (wins + 1) / (long + 2)
+      rally_data_share       share of earlier points with a known rally length
+    """
+    rally = match["rally"] if "rally" in match.columns else pd.Series(np.nan, index=match.index)
+    prev = _prev_only(rally.astype(float))
+    match["prev_rally_len"] = prev.fillna(RALLY_NEUTRAL_LEN)
+    match["rally_len_avg10"] = prev.rolling(RALLY_WINDOW, min_periods=1).mean().fillna(RALLY_NEUTRAL_LEN)
+    match["match_rally_avg"] = prev.expanding(min_periods=1).mean().fillna(RALLY_NEUTRAL_LEN)
+    long = (prev >= LONG_RALLY_SHOTS).to_numpy()
+    p1_won_prev = (_prev_only(match["point_winner"]) == 1).to_numpy()
+    wins, n = np.cumsum(long & p1_won_prev), np.cumsum(long)
+    match["p1_long_rally_win_pct"] = (wins + 1) / (n + 2)
+    n_earlier = np.arange(len(match))
+    match["rally_data_share"] = np.cumsum(prev.notna().to_numpy()) / np.maximum(n_earlier, 1)
+    return match
+
+
 def breaks_so_far(match: pd.DataFrame) -> pd.DataFrame:
     """Breaks of serve won and conceded so far in the match.
 
@@ -407,6 +439,7 @@ def build_features(points: pd.DataFrame, player_won_col: str = "p1_won") -> pd.D
         match = serve_bayes(match)
         match = breaks_so_far(match)
         match = court_side(match)
+        match = rally_features(match)
         match = score_context(match)
         match = surprise_feature(match, player_won_col, expected_col)
         parts.append(match)
@@ -449,6 +482,8 @@ POINT_FEATURES = (
     + ["p1_breaks_won", "p1_breaks_conceded"]
     + ["is_break_point", "is_set_point", "score_diff", "server_is_p1",
        "serve_from_ad_court"]
+    + ["prev_rally_len", "rally_len_avg10", "match_rally_avg",
+       "p1_long_rally_win_pct", "rally_data_share"]
     # score-context counters (score_context): running game/set score before
     # each point, plus game-situation pressure flags.
     + ["is_game_point", "is_tiebreak", "set_diff", "point_idx_match",

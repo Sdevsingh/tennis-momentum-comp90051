@@ -36,7 +36,6 @@ COLUMN_ALIASES = {
     "set_no": ["SetNo", "set"],
     "game_no": ["GameNo", "game"],
     "point_no": ["PointNumber", "Pt"],
-    "rally": ["Rally", "RallyCount"],
     "speed_kmh": ["Speed_KMH", "ServeSpeed"],
     "p1_ace": ["P1Ace"],
     "p2_ace": ["P2Ace"],
@@ -47,6 +46,32 @@ COLUMN_ALIASES = {
 }
 
 REQUIRED = ["point_server", "point_winner", "set_no", "game_no", "point_no"]
+
+
+def _rally_length(df: pd.DataFrame) -> pd.Series:
+    """Shots in each point's rally (serve = shot 1), NaN where not recorded.
+
+    The source has two columns: `Rally` (2011) and `RallyCount` (2016+); no
+    Slam recorded rally length in 2012-2015. Both count the serve as shot 1
+    (an odd count goes with the server winning the point), but their zeros
+    mix three things:
+      - double fault -> a genuine 0 (no ball in play); kept as 0;
+      - ace -> should be 1; AO and RG 2018-2021 write 0, recoded to 1;
+      - anything else -> not recorded (untracked matches are all zeros,
+        and tracking gaps come in runs); set to NaN.
+    """
+    def col(name):
+        if name not in df.columns:
+            return pd.Series(np.nan, index=df.index)
+        return pd.to_numeric(df[name], errors="coerce")
+
+    raw = col("RallyCount") if "RallyCount" in df.columns else col("Rally")
+    ace = (col("P1Ace").fillna(0) + col("P2Ace").fillna(0)) > 0
+    double_fault = (col("P1DoubleFault").fillna(0) + col("P2DoubleFault").fillna(0)) > 0
+    rally = raw.where(raw > 0)                       # positive counts are real
+    rally = rally.mask((raw == 0) & double_fault, 0.0)
+    rally = rally.mask((raw == 0) & ace & ~double_fault, 1.0)
+    return rally
 
 
 def _resolve_columns(df: pd.DataFrame) -> dict[str, str]:
@@ -73,8 +98,9 @@ def load_points_file(path: Path) -> pd.DataFrame | None:
         print(f"  [skip] {path.name}: missing {missing}", file=sys.stderr)
         return None
 
+    df["rally"] = _rally_length(df)
     out = df.rename(columns={v: k for k, v in colmap.items()})
-    keep = ["match_id"] + [c for c in COLUMN_ALIASES if c in out.columns]
+    keep = ["match_id"] + [c for c in COLUMN_ALIASES if c in out.columns] + ["rally"]
     # Each file is a whole tournament; the source's own match_id
     # (e.g. 2023-usopen-1701) identifies the match.
     out = out[keep].copy()
