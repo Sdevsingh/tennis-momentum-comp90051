@@ -45,16 +45,31 @@ class LogisticRegression:
         self.b = 0.0
         self._mu = None
         self._sd = None
+        self._const = None
 
     def _prep(self, X: np.ndarray, fit: bool) -> np.ndarray:
+        """Standardise with the training mean/sd.
+
+        A feature that is constant in the training data -- all values equal
+        to within floating-point rounding, not just sd == 0 exactly -- is set
+        to 0 in training AND prediction. Otherwise rounding noise (sd ~1e-12)
+        gets divided into, and a feature that never varied in training can
+        produce standardised test values of ~1e12 (it happened for the rally
+        features in a training block from 2012-2015, when no rally length
+        was recorded).
+        """
         X = np.asarray(X, dtype=float)
         if not self.standardise:
             return X
         if fit:
             self._mu = X.mean(axis=0)
             self._sd = X.std(axis=0)
-            self._sd[self._sd == 0] = 1.0
-        return (X - self._mu) / self._sd
+            spread = X.max(axis=0) - X.min(axis=0)
+            self._const = spread <= 1e-9 * np.maximum(1.0, np.abs(self._mu))
+            self._sd[self._const] = 1.0
+        Z = (X - self._mu) / self._sd
+        Z[:, self._const] = 0.0
+        return Z
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "LogisticRegression":
         X = self._prep(X, fit=True)

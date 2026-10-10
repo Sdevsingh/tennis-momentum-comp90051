@@ -93,7 +93,7 @@ def main() -> None:
                                     k=max(10, N_OUTER_REPEATS))
         for name, (make, grid) in MODELS.items():
             res = nested_cv(make, grid, X, y, match_ids, splits,
-                            score_names=("log_loss", "auc"))
+                            score_names=("log_loss", "auc"), temporal_inner=False)
             sensitivity[name][delta] = res["summary"]
             s = res["summary"]
             print(f"  [{name}] delta={delta:.2f}: "
