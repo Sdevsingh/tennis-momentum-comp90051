@@ -26,6 +26,11 @@ CV (nested_cv.py) tunes and evaluates it exactly like the others.
 HYPERPARAMETER (2.f): mem_slots, the number of memory slots, grid {2, 4, 8}
 (middle = 4). More slots = more relational capacity.
 
+DEVICE: runs on a GPU when this PyTorch build can see one -- NVIDIA (cuda),
+Intel Arc (xpu) or Apple (mps) -- else the CPU (config.RNN_DEVICE, or the
+TENNIS_RNN_DEVICE environment variable). The training data is moved to the
+device once per fit; predictions come back as numpy, so nested CV is unchanged.
+
 COMPUTE: a net inside nested CV is expensive, so fit() trains on at most
 RNN_MAX_TRAIN windowed points (the brief allows a subset for CV/tuning), with a
 small net, few epochs and early stopping on an internal split. We never report
@@ -33,10 +38,12 @@ loss-vs-epochs (2.g forbids it); epochs are only a training detail.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from ..config import (RNN_HISTORY, RNN_STEP_FEATURES, RNN_MAX_TRAIN,
-                      RNN_EPOCHS, RNN_BATCH, RNN_LR, SEED)
+                      RNN_EPOCHS, RNN_BATCH, RNN_LR, RNN_DEVICE, SEED)
 
 try:
     import torch
@@ -44,6 +51,28 @@ try:
     _TORCH = True
 except Exception:                                    # torch optional at import
     _TORCH = False
+
+
+def pick_device(preference: str | None = None) -> "torch.device":
+    """cuda -> xpu -> mps -> cpu, the first this PyTorch build can use.
+
+    `preference` (or TENNIS_RNN_DEVICE, or config.RNN_DEVICE) forces one;
+    "auto" means pick. Asking for a device that is not available falls back
+    to the CPU with a warning rather than crashing a long run.
+    """
+    pref = (preference or os.environ.get("TENNIS_RNN_DEVICE") or RNN_DEVICE).lower()
+    available = {
+        "cuda": torch.cuda.is_available(),
+        "xpu": hasattr(torch, "xpu") and torch.xpu.is_available(),
+        "mps": hasattr(torch.backends, "mps") and torch.backends.mps.is_available(),
+        "cpu": True,
+    }
+    if pref == "auto":
+        return torch.device(next(d for d in ("cuda", "xpu", "mps", "cpu") if available[d]))
+    if not available.get(pref, False):
+        print(f"  [relational_rnn] device '{pref}' not available in this PyTorch build; using cpu")
+        return torch.device("cpu")
+    return torch.device(pref)
 
 
 if _TORCH:
@@ -91,7 +120,7 @@ class RelationalRNN:
                  history: int = RNN_HISTORY, d_step: int = RNN_STEP_FEATURES,
                  n_epochs: int = RNN_EPOCHS, lr: float = RNN_LR,
                  batch: int = RNN_BATCH, max_train: int = RNN_MAX_TRAIN,
-                 seed: int = SEED):
+                 seed: int = SEED, device: str | None = None):
         if not _TORCH:
             raise ImportError("PyTorch is required for the Relational RNN "
                               "(pip install torch).")
@@ -105,6 +134,8 @@ class RelationalRNN:
         self.batch = batch
         self.max_train = max_train
         self.seed = seed
+        self.device = device
+        self._dev = None
         self._net = None
         self._n_static = None
 
@@ -133,17 +164,24 @@ class RelationalRNN:
         n_val = max(1, int(0.1 * n))
         val, tr = perm[:n_val], perm[n_val:]
 
-        dev = torch.device("cpu")
+        dev = self._dev = pick_device(self.device)
+        if dev.type == "cuda":
+            torch.cuda.manual_seed_all(self.seed)
         self._net = _RMC(self.d_step, self._n_static, self.mem_slots,
                          self.head_size, self.n_heads).to(dev)
         opt = torch.optim.Adam(self._net.parameters(), lr=self.lr)
         loss_fn = nn.BCEWithLogitsLoss()
+        # the whole (subsampled) training set goes to the device once
+        seq_t = torch.from_numpy(seq).to(dev)
+        static_t = torch.from_numpy(static).to(dev)
+        y_t = torch.from_numpy(y).to(dev)
+        val_t = torch.from_numpy(val).to(dev)
 
         def batches(ix):
+            ix = torch.from_numpy(ix).to(dev)
             for s in range(0, len(ix), self.batch):
                 b = ix[s:s + self.batch]
-                yield (torch.from_numpy(seq[b]), torch.from_numpy(static[b]),
-                       torch.from_numpy(y[b]))
+                yield seq_t[b], static_t[b], y_t[b]
 
         best_val, best_state, patience = float("inf"), None, 0
         for _ in range(self.n_epochs):
@@ -156,9 +194,8 @@ class RelationalRNN:
             # validation loss for early stopping (NOT reported as a result)
             self._net.eval()
             with torch.no_grad():
-                vl = loss_fn(self._net(torch.from_numpy(seq[val]),
-                                       torch.from_numpy(static[val])),
-                             torch.from_numpy(y[val])).item()
+                vl = loss_fn(self._net(seq_t[val_t], static_t[val_t]),
+                             y_t[val_t]).item()
             if vl < best_val - 1e-4:
                 best_val, best_state, patience = vl, {
                     k: v.clone() for k, v in self._net.state_dict().items()}, 0
@@ -179,9 +216,9 @@ class RelationalRNN:
         out = np.empty(len(seq), dtype=np.float32)
         with torch.no_grad():
             for s in range(0, len(seq), self.batch):
-                sb = torch.from_numpy(seq[s:s + self.batch])
-                stb = torch.from_numpy(static[s:s + self.batch])
-                out[s:s + self.batch] = torch.sigmoid(self._net(sb, stb)).numpy()
+                sb = torch.from_numpy(seq[s:s + self.batch]).to(self._dev)
+                stb = torch.from_numpy(static[s:s + self.batch]).to(self._dev)
+                out[s:s + self.batch] = torch.sigmoid(self._net(sb, stb)).cpu().numpy()
         return out
 
 

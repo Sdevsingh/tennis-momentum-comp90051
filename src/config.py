@@ -94,3 +94,7 @@ RNN_MAX_TRAIN = 40_000
 RNN_EPOCHS = 8
 RNN_BATCH = 512
 RNN_LR = 1e-3
+# Device for the RNN: "auto" picks cuda (NVIDIA) -> xpu (Intel Arc) -> mps
+# (Apple) -> cpu, whichever this PyTorch build can use. Or force one, e.g.
+# "cpu". The environment variable TENNIS_RNN_DEVICE overrides this.
+RNN_DEVICE = "auto"
