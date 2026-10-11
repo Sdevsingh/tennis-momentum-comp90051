@@ -15,7 +15,11 @@ streak-selection bias (Miller & Sanjurjo), so comparing real vs shuffled
 cancels that bias instead of being fooled by it.
 
 --null points|games|both picks the levels (default both); comparing them shows
-whether any order effect lives inside games or across games.
+whether any order effect lives inside games or across games. --null replay
+instead re-forms each match from per-server pools of its real points (games
+and sets end wherever the scoring rules say), which removes the within-game
+"drawing without replacement" structure the other modes keep; see
+src/null_shuffle.py.
 """
 from __future__ import annotations
 
@@ -108,7 +112,11 @@ def main() -> None:
     ap.add_argument("--pooled", action="store_true",
                     help="one model for men and women together (default: separate models per tour)")
     ap.add_argument("--null", choices=MODES, default="both",
-                    help="what the null shuffles: points within games, games within sets, or both")
+                    help="points within games, games within sets, both, or replay "
+                         "(re-form each match from per-server pools of its points)")
+    ap.add_argument("--on-exhaust", choices=("recycle", "stop"), default="recycle",
+                    help="replay only: when a server's pool runs out, reuse a fresh "
+                         "shuffled copy (recycle) or end the match there (stop)")
     args = ap.parse_args()
     by_tour = not args.pooled
     pts = pd.read_parquet(PROCESSED_DIR / "points.parquet")
@@ -117,11 +125,12 @@ def main() -> None:
     real = _run_one(pts, "real", by_tour)
 
     stats: dict = {}
-    null = shuffle_null(pts, mode=args.null, stats=stats)
+    null = shuffle_null(pts, mode=args.null, stats=stats, on_exhaust=args.on_exhaust)
     print(f"SHUFFLED ({args.null}) no-momentum data:  {stats}")
     shuffled = _run_one(null, "shuffled", by_tour)
 
-    out = {"by_tour": by_tour, "null": args.null, "shuffle_stats": stats,
+    out = {"by_tour": by_tour, "null": args.null, "on_exhaust": args.on_exhaust,
+           "shuffle_stats": stats,
            "real": real, "shuffled": shuffled}
     suffix = ("" if by_tour else "_pooled") + ("" if args.null == "both" else f"_{args.null}")
     dest = RESULTS_DIR / f"exp1_shuffle_control{suffix}.json"

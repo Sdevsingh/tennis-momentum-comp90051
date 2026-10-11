@@ -14,8 +14,21 @@ outcomes, and keeps every shuffled match legal tennis:
             exactly as it did; a tiebreak stays as the set's last game; only
             orders in which the set is decided on its last game are allowed.
   "both"    games first, then points within each game.
+  "replay"  re-form the whole match: points move freely between games and
+            sets, only staying with their server. Each player's serve points
+            from the whole match form a pool; the match is replayed under the
+            event's scoring rules (src/tennis_rules.py) from the real first
+            server, every point drawn from the current server's pool without
+            replacement, and games and sets end wherever the rules say. Every
+            game is legal by construction (it ends on its winner's point), but
+            game/set scores and the match winner can differ from reality. If a
+            server's pool runs out before the match is over, a fresh shuffled
+            copy of it is used (on_exhaust="recycle") or the match stops there
+            (on_exhaust="stop"); points left unused at the end are dropped.
+            Unlike the modes above it does not fix any game's contents, so it
+            has no within-game "drawing without replacement" structure.
 
-What is kept exactly: every point and game result, each game's final score,
+What "points"/"games"/"both" keep exactly: every point and game result, each game's final score,
 each player's serve record, set scores and winners, the match result, serve
 alternation. What is scrambled: the order of points within games and of games
 within sets -- i.e. any dependence of an outcome on what came just before it.
@@ -35,9 +48,9 @@ import numpy as np
 import pandas as pd
 
 from .config import SEED
-from .tennis_rules import tiebreak_rule
+from .tennis_rules import tiebreak_rule, sets_to_win
 
-MODES = ("points", "games", "both")
+MODES = ("points", "games", "both", "replay")
 
 
 # ---------------------------------------------------------------- legality
@@ -175,17 +188,117 @@ def _runs(keys: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(bounds[:-1], bounds[1:]))
 
 
+def _replay_match(match_id: str, idx: np.ndarray, win_all, srv_all, rng, st,
+                  on_exhaust: str):
+    """Replay one match from per-server pools of its real points.
+
+    Returns (rows, set_nos, game_nos): the drawn row positions in playing
+    order and the set/game each falls in.
+    """
+    pools = {p: idx[srv_all[idx] == p] for p in (1, 2)}
+    if not len(pools[1]) or not len(pools[2]):
+        st["matches_left_unshuffled"] += 1      # a player never served: keep it real
+        return idx, None, None
+    queue = {p: list(rng.permutation(pools[p])) for p in (1, 2)}
+    cap = 4 * len(idx) + 200                     # safety for endless advantage sets
+
+    rows, set_nos, game_nos = [], [], []
+
+    def draw(server):
+        if not queue[server]:
+            if on_exhaust == "stop":
+                return None
+            st["pools_recycled"] += 1
+            queue[server] = list(rng.permutation(pools[server]))
+        return queue[server].pop()
+
+    sets = {1: 0, 2: 0}
+    need = sets_to_win(match_id)
+    server = int(srv_all[idx[0]])
+    set_no = 0
+    stopped = False
+    while max(sets.values()) < need and not stopped:
+        set_no += 1
+        games = {1: 0, 2: 0}
+        tb_at, tb_target = tiebreak_rule(match_id, set_no)
+        game_no = 0
+        while not stopped:
+            game_no += 1
+            other = 3 - server
+            tiebreak = tb_at is not None and games[1] == games[2] == tb_at
+            target = tb_target if tiebreak else 4
+            pts = {1: 0, 2: 0}
+            j = 0
+            while not _decided(pts[1], pts[2], target):
+                srv = server if (not tiebreak or ((j + 1) // 2) % 2 == 0) else other
+                row = draw(srv)
+                if row is None or len(rows) >= cap:
+                    stopped = True
+                    break
+                rows.append(row); set_nos.append(set_no); game_nos.append(game_no)
+                pts[int(win_all[row])] += 1
+                j += 1
+            if stopped:
+                break
+            games[1 if pts[1] > pts[2] else 2] += 1
+            server = other
+            if tiebreak or (max(games.values()) >= 6 and abs(games[1] - games[2]) >= 2):
+                break
+        if not stopped:
+            sets[1 if games[1] > games[2] else 2] += 1
+    if stopped:
+        st["matches_stopped"] += 1
+    else:
+        real_winner = int(win_all[idx[-1]])
+        st["winner_changed"] += int((1 if sets[1] > sets[2] else 2) != real_winner)
+    st["points_real"] += len(idx)
+    st["points_replayed"] += len(rows)
+    return np.asarray(rows), np.asarray(set_nos), np.asarray(game_nos)
+
+
+def _replay_null(pts: pd.DataFrame, rng, on_exhaust: str) -> tuple[pd.DataFrame, dict]:
+    st = {"matches": 0, "matches_left_unshuffled": 0, "pools_recycled": 0,
+          "matches_stopped": 0, "winner_changed": 0, "points_real": 0, "points_replayed": 0}
+    mid = pts["match_id"].to_numpy()
+    win_all = pts["point_winner"].to_numpy()
+    srv_all = pts["point_server"].to_numpy()
+    parts = []
+    for a, b in _runs(pd.factorize(mid)[0]):
+        st["matches"] += 1
+        idx = np.arange(a, b)
+        rows, sets_, games_ = _replay_match(mid[a], idx, win_all, srv_all, rng, st, on_exhaust)
+        part = pts.iloc[rows].reset_index(drop=True)
+        if sets_ is not None:
+            part["set_no"] = sets_.astype(pts["set_no"].dtype)
+            part["game_no"] = games_.astype(pts["game_no"].dtype)
+        parts.append(part)
+    return pd.concat(parts, ignore_index=True), st
+
+
 def shuffle_null(points: pd.DataFrame, mode: str = "both", seed: int = SEED,
-                 stats: dict | None = None) -> pd.DataFrame:
-    """The exp1 null: shuffle points within games and/or games within sets.
+                 stats: dict | None = None, on_exhaust: str = "recycle") -> pd.DataFrame:
+    """The exp1 null: shuffle points within games and/or games within sets, or
+    replay each match from per-server point pools (mode="replay").
 
     `points` is the loader's point table (one row per point, playing order).
     Pass a dict as `stats` to get back how many games/sets were shuffled or
-    left in their real order.
+    left in their real order (for "replay": pool recycles, stopped matches,
+    changed winners and real vs replayed point counts). `on_exhaust` only
+    applies to "replay": "recycle" (default) or "stop".
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
+    if on_exhaust not in ("recycle", "stop"):
+        raise ValueError('on_exhaust must be "recycle" or "stop"')
     rng = np.random.default_rng(seed)
+    if mode == "replay":
+        res, st = _replay_null(points.reset_index(drop=True), rng, on_exhaust)
+        res["point_no"] = (res.groupby("match_id", sort=False).cumcount() + 1).astype(str)
+        res["p1_won"] = (res["point_winner"] == 1).astype(int)
+        res["server_won"] = (res["point_winner"] == res["point_server"]).astype(int)
+        if stats is not None:
+            stats.update(st)
+        return res
     st = {"games": 0, "games_left_unshuffled": 0, "sets": 0, "sets_left_unshuffled": 0}
     pts = points.reset_index(drop=True)
     mid = pts["match_id"].to_numpy()
