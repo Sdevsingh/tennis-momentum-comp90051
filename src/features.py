@@ -281,7 +281,14 @@ def slam_rally_baseline(points: pd.DataFrame) -> pd.Series:
     subset gives a baseline from that subset only.
     """
     known = points[points["rally"].notna()] if "rally" in points.columns else points.iloc[:0]
-    mids = pd.Series(points["match_id"].unique())
+    all_mids = pd.Series(points["match_id"].unique())
+    # Only real Slam ids ("2019-wimbledon-1301") have a slam/year/round;
+    # anything else (e.g. exp3's simulated "sim0000") gets the neutral value.
+    slam_id = all_mids.str.match(r"^\d{4}-[a-z]+-[A-Za-z]*\d{3,}$")
+    neutral = pd.Series(RALLY_NEUTRAL_LEN, index=all_mids[~slam_id].values, dtype=float)
+    mids = all_mids[slam_id].reset_index(drop=True)
+    if mids.empty:
+        return neutral
     key = pd.DataFrame({"match_id": mids,
                         "slam": mids.str.split("-").str[1],
                         "year": mids.str[:4].astype(int),
@@ -292,7 +299,8 @@ def slam_rally_baseline(points: pd.DataFrame) -> pd.Series:
     # cumulative over earlier blocks only (shift excludes the match's own round)
     cum = blocks.groupby(level="slam").cumsum().groupby(level="slam").shift(1).fillna(0)
     base = (cum["sum"] / cum["count"].where(cum["count"] > 0)).fillna(RALLY_NEUTRAL_LEN)
-    return key.join(base.rename("baseline"), on=["slam", "year", "round"]).set_index("match_id")["baseline"]
+    out = key.join(base.rename("baseline"), on=["slam", "year", "round"]).set_index("match_id")["baseline"]
+    return pd.concat([out, neutral])
 
 
 def server_rally_ratios(match: pd.DataFrame, baseline: float) -> pd.DataFrame:
