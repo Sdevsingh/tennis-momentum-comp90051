@@ -496,11 +496,25 @@ _PER_PLAYER = ["elo", "ts_mu", "ts_sigma", "serve_skill", "return_skill",
                "elo_surface", "ts_surface_mu", "ts_surface_sigma", "surface_matches",
                "career_serve_win_pct", "stat_matches"]
 
+# Long-tailed features the models get on a log scale (feature name gets a
+# "log_" prefix; the raw column stays in the table). Counts and days use
+# log(1 + x) because they include 0; the TrueSkill sigmas are always > 0.
+# Trees are unaffected (monotone transform); it stops a few extreme players
+# dominating the linear model.
+LOG1P_FEATURES = ["days_since_prev_event", "games_this_event", "slam_matches"]
+LOG_FEATURES = ["ts_sigma", "ts_surface_sigma"]
+LOG1P_MATCH_FEATURES = ["h2h_matches"]
+
+
+def _model_name(c: str) -> str:
+    return f"log_{c}" if c in LOG1P_FEATURES + LOG_FEATURES else c
+
+
 # Same value on every point of a match.
 PLAYER_MATCH_FEATURES = (
-    [f"p{i}_{c}" for c in _PER_PLAYER for i in (1, 2)]
+    [f"p{i}_{_model_name(c)}" for c in _PER_PLAYER for i in (1, 2)]
     + ["elo_diff", "p1_elo_win_prob", "p1_ts_win_prob",
-       "h2h_matches", "p1_h2h_win_pct", "p1_h2h_share",
+       "log_h2h_matches", "p1_h2h_win_pct", "p1_h2h_share",
        "elo_surface_diff", "p1_elo_surface_win_prob", "p1_ts_surface_win_prob",
        "player_features_known"]
 )
@@ -581,6 +595,14 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
                                        out["p2_serve_expected"])
     out["expected_p1_win"] = np.where(p1_serving, out["p1_serve_expected"],
                                       1.0 - out["p2_serve_expected"])
+    for c in LOG1P_FEATURES:
+        for i in (1, 2):
+            out[f"p{i}_log_{c}"] = np.log1p(out[f"p{i}_{c}"].astype(float).clip(lower=0))
+    for c in LOG_FEATURES:
+        for i in (1, 2):
+            out[f"p{i}_log_{c}"] = np.log(out[f"p{i}_{c}"].astype(float))
+    for c in LOG1P_MATCH_FEATURES:
+        out[f"log_{c}"] = np.log1p(out[c].astype(float).clip(lower=0))
     # p1_/p2_serve_expected are kept (not model features): they seed the
     # rolling serve win % before a player has served (features.py).
     return out
