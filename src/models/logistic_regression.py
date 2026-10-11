@@ -88,6 +88,16 @@ class LogisticRegression:
 # Hyperparameter grid, centred so the middle value should win most often.
 PARAM_GRID = {"lam": [0.001, 0.01, 0.1]}
 
+# Per-tour grids for experiments that fit men and women separately (exp1).
+# In exp1 the men's models chose the middle lam (0.01) in 8/10 outer folds,
+# the women's chose the top of the grid (0.1) in 10/10: women's points are
+# harder to predict and want more regularisation, so their grid is centred
+# on 0.1.
+PARAM_GRID_BY_TOUR = {
+    "men": {"lam": [0.001, 0.01, 0.1]},
+    "women": {"lam": [0.03, 0.1, 0.3]},
+}
+
 
 def make_model(**params) -> LogisticRegression:
     return LogisticRegression(**params)

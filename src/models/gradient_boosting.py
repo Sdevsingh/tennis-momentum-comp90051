@@ -53,6 +53,14 @@ class GradientBoosting:
 # at 200+; the old grid [100, 200, 400] picked its lowest value in every fold.
 PARAM_GRID = {"n_estimators": [20, 40, 80]}
 
+# Per-tour grids for experiments that fit men and women separately (exp1).
+# In exp1 the men's models chose the middle (40 trees) in 10/10 outer folds,
+# the women's chose the bottom (20) in 10/10, so their grid is centred on 20.
+PARAM_GRID_BY_TOUR = {
+    "men": {"n_estimators": [20, 40, 80]},
+    "women": {"n_estimators": [10, 20, 40]},
+}
+
 
 def make_model(**params) -> GradientBoosting:
     return GradientBoosting(**params)

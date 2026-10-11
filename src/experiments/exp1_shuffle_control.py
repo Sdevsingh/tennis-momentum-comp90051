@@ -33,6 +33,13 @@ from ..null_shuffle import shuffle_null, MODES
 # from ..models import relational_rnn  # enable when ready
 
 
+# Per-tour hyperparameter grids (used when men and women get separate models);
+# a model without one uses its MODELS grid for both tours.
+TOUR_GRIDS = {
+    "logreg": logistic_regression.PARAM_GRID_BY_TOUR,
+    "gboost": gradient_boosting.PARAM_GRID_BY_TOUR,
+}
+
 MODELS = {
     "logreg": (logistic_regression.make_model, logistic_regression.PARAM_GRID),
     "gboost": (gradient_boosting.make_model, gradient_boosting.PARAM_GRID),
@@ -58,13 +65,15 @@ def tour_of(match_ids: pd.Series) -> pd.Series:
     return first.map({"1": "men", "M": "men", "2": "women", "W": "women"})
 
 
-def _nested_cv_all_models(X, y, match_ids, label: str) -> dict:
+def _nested_cv_all_models(X, y, match_ids, label: str, tour: str | None = None) -> dict:
     ordered = matches_in_time_order(match_ids.tolist())
     splits = temporal_match_splits(ordered, n_parts=N_OUTER_REPEATS + 1)
     results = {}
     for name, (make, grid) in MODELS.items():
+        grid = TOUR_GRIDS.get(name, {}).get(tour, grid)
         res = nested_cv(make, grid, X, y, match_ids, splits)
         results[name] = {
+            "grid": grid,
             "summary": res["summary"],
             "per_split": res["per_split"],
             "centring": {k: {str(v): n for v, n in c.items()}
@@ -89,7 +98,7 @@ def _run_one(points: pd.DataFrame, label: str, by_tour: bool = True) -> dict:
     results = {}
     for tour in ("men", "women"):
         m = tours == tour
-        results[tour] = _nested_cv_all_models(X[m], y[m], match_ids[m], f"{label}/{tour}")
+        results[tour] = _nested_cv_all_models(X[m], y[m], match_ids[m], f"{label}/{tour}", tour)
     return results
 
 
