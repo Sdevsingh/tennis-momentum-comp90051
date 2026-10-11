@@ -557,7 +557,20 @@ class FeatureScope(str, Enum):
     POINT = "point"
 
 
-MATCH_FEATURES = PLAYER_MATCH_FEATURES + PLAYER_SERVER_VIEW_FEATURES
+# Computed (other features are built from them) but not given to the models:
+# each is an exact sum/difference of features the models already get, so it
+# adds no information and makes the feature matrix singular (VIF = infinite,
+# notebooks/03_multicollinearity.ipynb).
+EXCLUDED_FEATURES = {
+    "cur_set_no",          # = p1_sets_won + p2_sets_won + 1
+    "score_diff",          # = p1_games_set - p2_games_set
+    "games_done_in_set",   # = p1_games_set + p2_games_set
+    "elo_diff",            # = p1_elo - p2_elo
+    "elo_surface_diff",    # = p1_elo_surface - p2_elo_surface
+}
+
+MATCH_FEATURES = [c for c in PLAYER_MATCH_FEATURES + PLAYER_SERVER_VIEW_FEATURES
+                  if c not in EXCLUDED_FEATURES]
 
 POINT_FEATURES = (
     [f"winrate_w{w}" for w in WINDOW_SIZES]
@@ -583,6 +596,7 @@ POINT_FEATURES = (
        "p1_games_set", "p2_games_set", "p1_sets_won", "p2_sets_won",
        "server_pts_game", "receiver_pts_game"]
 )
+POINT_FEATURES = [c for c in POINT_FEATURES if c not in EXCLUDED_FEATURES]
 
 FEATURE_SCOPE: dict[str, FeatureScope] = {
     **{c: FeatureScope.MATCH for c in MATCH_FEATURES},
