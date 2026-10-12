@@ -23,6 +23,7 @@ import pandas as pd
 from ..config import PROCESSED_DIR, RESULTS_DIR, HISTORY_LENGTHS, N_OUTER_REPEATS
 from ..features import build_features
 from ..cross_validation import temporal_match_splits
+from .exp1_shuffle_control import matches_in_time_order
 from ..nested_cv import nested_cv
 from ..models import logistic_regression, gradient_boosting
 # from ..models import relational_rnn  # enable when ready
@@ -78,7 +79,7 @@ def main() -> None:
     feats = build_features(pts, player_won_col="p1_won").fillna(0.0)
     y = feats["p1_won"].to_numpy()
     match_ids = feats["match_id"].to_numpy()
-    ordered = list(dict.fromkeys(match_ids.tolist()))
+    ordered = matches_in_time_order(match_ids.tolist())   # year, then AO, RG, Wimbledon, USO
     splits = temporal_match_splits(ordered, n_parts=N_OUTER_REPEATS + 1)
 
     curves = {}

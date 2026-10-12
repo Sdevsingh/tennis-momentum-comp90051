@@ -16,7 +16,7 @@ from typing import Callable
 
 import numpy as np
 
-from .cross_validation import kfold_match_splits, iter_fold_indices
+from .cross_validation import kfold_match_splits, expanding_window_splits, iter_fold_indices
 from .config import N_INNER_FOLDS
 from . import metrics
 
@@ -35,8 +35,15 @@ def grid_search(make_model: Callable,
                 match_ids: np.ndarray,
                 score_name: str = "log_loss",
                 k_inner: int = N_INNER_FOLDS,
-                seed: int = 51) -> TuningResult:
-    """Exhaustive grid search by inner k-fold CV over matches.
+                seed: int = 51,
+                ordered_match_ids=None) -> TuningResult:
+    """Exhaustive grid search by inner CV over matches.
+
+    With `ordered_match_ids` (the training matches in time order), the inner
+    folds are forward-chaining: the matches are cut into k_inner + 1 time
+    blocks and fold r trains on blocks 1..r and validates on block r + 1, so
+    tuning never validates on matches played before the ones it trained on.
+    Without it (e.g. simulated data with no time axis), plain random k-fold.
 
     make_model(**params) must return an object with .fit(X, y) and
     .predict_proba(X) -> P(class 1). Lower-is-better for log_loss/brier;
@@ -48,8 +55,11 @@ def grid_search(make_model: Callable,
     lower_is_better = score_name in ("log_loss", "brier")
     score_fn = metrics.ALL_METRICS[score_name]
 
-    unique_matches = list(dict.fromkeys(match_ids.tolist()))
-    inner_splits = kfold_match_splits(unique_matches, k=k_inner, seed=seed)
+    if ordered_match_ids is not None:
+        inner_splits = expanding_window_splits(list(ordered_match_ids), n_repeats=k_inner)
+    else:
+        unique_matches = list(dict.fromkeys(match_ids.tolist()))
+        inner_splits = kfold_match_splits(unique_matches, k=k_inner, seed=seed)
 
     # Cartesian product of the grid.
     names = list(param_grid)
@@ -85,8 +95,15 @@ def nested_cv(make_model: Callable,
               match_ids: np.ndarray,
               outer_splits,
               score_names=("log_loss", "brier", "auc"),
-              seed: int = 51):
+              seed: int = 51,
+              temporal_inner: bool = True):
     """Full nested CV.
+
+    temporal_inner (default): the outer splits list each training fold's
+    matches in time order (temporal_match_splits / expanding_window_splits
+    do), and the inner tuning folds are forward-chaining in that order. Pass
+    False when the outer splits have no time order (random k-fold, e.g. the
+    simulated data in exp3); the inner folds are then random k-fold.
 
     For each outer split: tune on the training fold, refit the best model on
     all of that fold, evaluate on the held-out fold. Returns per-split metric
@@ -100,7 +117,8 @@ def nested_cv(make_model: Callable,
     for split in outer_splits:
         tr, te = iter_fold_indices(match_ids, split)
         tuning = grid_search(make_model, param_grid, X[tr], y[tr],
-                             match_ids[tr], seed=seed)
+                             match_ids[tr], seed=seed,
+                             ordered_match_ids=split.train_match_ids if temporal_inner else None)
         selected_params.append(tuning.best_params)
 
         model = make_model(**tuning.best_params)

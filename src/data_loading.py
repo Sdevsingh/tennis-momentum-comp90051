@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 from .config import RAW_DIR, PROCESSED_DIR
+from .tennis_rules import sets_to_win
 
 # Canonical names we use downstream -> list of possible source spellings.
 COLUMN_ALIASES = {
@@ -111,6 +112,39 @@ def load_points_file(path: Path) -> pd.DataFrame | None:
     return out.reset_index(drop=True)
 
 
+def corrupt_match_reasons(table: pd.DataFrame) -> dict[str, str]:
+    """Matches whose point log cannot be legal tennis -> the reason.
+
+    - "set number goes backwards": SetNo flip-flops mid-match (e.g. 3, 4,
+      3, 4), so the set structure is unknown;
+    - "too many sets before the deciding set": replaying the log (a game is
+      won by the winner of its last point, a set by whoever has more games
+      when the set number changes) gives a player more sets than the format
+      allows before the last point (men 2, women 1), which means games or
+      points are missing inside a set.
+    Every score-based feature would be wrong for these matches.
+    """
+    reasons = {}
+    for mid, m in table.groupby("match_id", sort=False):
+        set_no = m["set_no"].to_numpy()
+        if (np.diff(set_no) < 0).any():
+            reasons[mid] = "set number goes backwards"
+            continue
+        key = list(zip(set_no, m["game_no"].to_numpy()))
+        winners = m["point_winner"].to_numpy()
+        games, sets, cap = {1: 0, 2: 0}, {1: 0, 2: 0}, sets_to_win(mid) - 1
+        for i in range(1, len(m)):
+            if key[i] != key[i - 1]:
+                games[int(winners[i - 1])] += 1
+            if set_no[i] != set_no[i - 1]:
+                sets[1 if games[1] > games[2] else 2] += 1
+                games = {1: 0, 2: 0}
+                if max(sets.values()) > cap:
+                    reasons[mid] = "too many sets before the deciding set"
+                    break
+    return reasons
+
+
 def build_point_table(raw_dir: Path = RAW_DIR) -> pd.DataFrame:
     """Concatenate every '-points.csv' under raw_dir into one tidy table.
 
@@ -138,6 +172,14 @@ def build_point_table(raw_dir: Path = RAW_DIR) -> pd.DataFrame:
     table["point_no"] = table["point_no"].astype(str)
     table["p1_won"] = (table["point_winner"] == 1).astype(int)
     table["server_won"] = (table["point_winner"] == table["point_server"]).astype(int)
+
+    # Drop matches whose log is not legal tennis (see corrupt_match_reasons).
+    bad = corrupt_match_reasons(table)
+    if bad:
+        n_pts = int(table["match_id"].isin(bad).sum())
+        table = table[~table["match_id"].isin(bad)].reset_index(drop=True)
+        counts = pd.Series(bad).value_counts().to_dict()
+        print(f"Dropped {len(bad)} corrupt matches ({n_pts:,} points): {counts}")
 
     # Source rows are already in playing order within each match. Don't sort
     # on point_no: it is read as text in files with '0X'/'0Y' rows, so

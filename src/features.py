@@ -13,8 +13,10 @@ Each function appends columns to the per-match frame and returns it. Compose
 them in `build_features`.
 
 Every feature has a FeatureScope: MATCH (built only from information before
-the match) or POINT (updated during the match). `feature_columns(scope)`
-returns one group; FEATURE_COLUMNS is all of them.
+the match), POINT_STRUCTURE (updated during the match, no memory of earlier
+points: who is serving) or POINT_MEMORY (updated from the points already
+played, including the score). `feature_columns(scope)` returns one group
+("point" = both in-match groups); FEATURE_COLUMNS is all of them.
 """
 from __future__ import annotations
 
@@ -281,7 +283,14 @@ def slam_rally_baseline(points: pd.DataFrame) -> pd.Series:
     subset gives a baseline from that subset only.
     """
     known = points[points["rally"].notna()] if "rally" in points.columns else points.iloc[:0]
-    mids = pd.Series(points["match_id"].unique())
+    all_mids = pd.Series(points["match_id"].unique())
+    # Only real Slam ids ("2019-wimbledon-1301") have a slam/year/round;
+    # anything else (e.g. exp3's simulated "sim0000") gets the neutral value.
+    slam_id = all_mids.str.match(r"^\d{4}-[a-z]+-[A-Za-z]*\d{3,}$")
+    neutral = pd.Series(RALLY_NEUTRAL_LEN, index=all_mids[~slam_id].values, dtype=float)
+    mids = all_mids[slam_id].reset_index(drop=True)
+    if mids.empty:
+        return neutral
     key = pd.DataFrame({"match_id": mids,
                         "slam": mids.str.split("-").str[1],
                         "year": mids.str[:4].astype(int),
@@ -292,7 +301,8 @@ def slam_rally_baseline(points: pd.DataFrame) -> pd.Series:
     # cumulative over earlier blocks only (shift excludes the match's own round)
     cum = blocks.groupby(level="slam").cumsum().groupby(level="slam").shift(1).fillna(0)
     base = (cum["sum"] / cum["count"].where(cum["count"] > 0)).fillna(RALLY_NEUTRAL_LEN)
-    return key.join(base.rename("baseline"), on=["slam", "year", "round"]).set_index("match_id")["baseline"]
+    out = key.join(base.rename("baseline"), on=["slam", "year", "round"]).set_index("match_id")["baseline"]
+    return pd.concat([out, neutral])
 
 
 def server_rally_ratios(match: pd.DataFrame, baseline: float) -> pd.DataFrame:
@@ -542,14 +552,35 @@ class FeatureScope(str, Enum):
            p_serve_expected, expected_p1_win, ...) are the same pre-match
            values seen from whoever is serving, so they flip with the serve
            but are never updated by what happens in the match.
-    POINT  updated during the match: built from points already played, or
-           the state of the current point (who is serving, the score).
+    POINT_STRUCTURE  updated during the match but carrying no memory of
+                     earlier points: only who is serving.
+    POINT_MEMORY     updated during the match from the points already
+                     played. Includes the score and everything read off it
+                     (game/set score, break/game/set point, tiebreak), point
+                     counts and court side, breaks, serve and win-rate
+                     summaries, rally summaries and rally-data coverage.
+    POINT_STRUCTURE + POINT_MEMORY are the in-match features (POINT_FEATURES,
+    feature_columns("point")).
     """
     MATCH = "match"
-    POINT = "point"
+    POINT_STRUCTURE = "point_structure"
+    POINT_MEMORY = "point_memory"
 
 
-MATCH_FEATURES = PLAYER_MATCH_FEATURES + PLAYER_SERVER_VIEW_FEATURES
+# Computed (other features are built from them) but not given to the models:
+# each is an exact sum/difference of features the models already get, so it
+# adds no information and makes the feature matrix singular (VIF = infinite,
+# notebooks/03_multicollinearity.ipynb).
+EXCLUDED_FEATURES = {
+    "cur_set_no",          # = p1_sets_won + p2_sets_won + 1
+    "score_diff",          # = p1_games_set - p2_games_set
+    "games_done_in_set",   # = p1_games_set + p2_games_set
+    "elo_diff",            # = p1_elo - p2_elo
+    "elo_surface_diff",    # = p1_elo_surface - p2_elo_surface
+}
+
+MATCH_FEATURES = [c for c in PLAYER_MATCH_FEATURES + PLAYER_SERVER_VIEW_FEATURES
+                  if c not in EXCLUDED_FEATURES]
 
 POINT_FEATURES = (
     [f"winrate_w{w}" for w in WINDOW_SIZES]
@@ -575,17 +606,32 @@ POINT_FEATURES = (
        "p1_games_set", "p2_games_set", "p1_sets_won", "p2_sets_won",
        "server_pts_game", "receiver_pts_game"]
 )
+POINT_FEATURES = [c for c in POINT_FEATURES if c not in EXCLUDED_FEATURES]
+
+# In-match features with no memory of earlier points; every other in-match
+# feature is memory (see FeatureScope).
+POINT_STRUCTURE_FEATURES = ["server_is_p1"]
+POINT_MEMORY_FEATURES = [c for c in POINT_FEATURES if c not in POINT_STRUCTURE_FEATURES]
 
 FEATURE_SCOPE: dict[str, FeatureScope] = {
     **{c: FeatureScope.MATCH for c in MATCH_FEATURES},
-    **{c: FeatureScope.POINT for c in POINT_FEATURES},
+    **{c: FeatureScope.POINT_STRUCTURE for c in POINT_STRUCTURE_FEATURES},
+    **{c: FeatureScope.POINT_MEMORY for c in POINT_MEMORY_FEATURES},
 }
 
 FEATURE_COLUMNS = MATCH_FEATURES + POINT_FEATURES
 
 
-def feature_columns(scope: FeatureScope | None = None) -> list[str]:
-    """All feature columns, or only those of one scope."""
+def feature_columns(scope: FeatureScope | str | None = None) -> list[str]:
+    """All feature columns, or only those of one scope.
+
+    `scope` is a FeatureScope (or its value, e.g. "point_memory"), or
+    "point" for both in-match groups (POINT_STRUCTURE + POINT_MEMORY).
+    """
     if scope is None:
         return list(FEATURE_COLUMNS)
+    if scope == "point":
+        return [c for c in FEATURE_COLUMNS
+                if FEATURE_SCOPE[c] is not FeatureScope.MATCH]
+    scope = FeatureScope(scope)
     return [c for c in FEATURE_COLUMNS if FEATURE_SCOPE[c] is scope]
