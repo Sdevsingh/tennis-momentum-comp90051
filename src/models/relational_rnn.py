@@ -8,9 +8,12 @@ WHY IT FITS THE PROJECT
 A standard LSTM (which the subject covers) squeezes the past into one hidden
 vector. The Relational Memory Core (RMC) keeps a MATRIX of memory slots and, at
 each step, lets them interact through multi-head self-attention before a gated
-update. It reads the RAW point sequence (src/sequences.py), not the engineered
-features, so it can discover order-dependent "momentum" structure the hand-built
-features never encode. That is exactly the research question.
+update. It reads the RAW memory of earlier points (src/sequences.py: who won,
+who served, rally length) instead of the engineered memory features, so it can
+discover order-dependent "momentum" structure the hand-built features never
+encode. That is exactly the research question. Pre-match (MATCH) features and
+the current server (POINT_STRUCTURE) go in as static context, so it is not
+blind to player strength or to who serves.
 
 WHY IT WAS NOT TAUGHT IN CLASS (for the literature review)
 The syllabus covers standard RNN/LSTM; the RMC's defining component -- self
@@ -21,7 +24,10 @@ Matches the other models: fit(X, y) / predict_proba(X). X is the flat sequence
 matrix from src/sequences.build_sequence_matrix: the first RNN_HISTORY *
 RNN_STEP_FEATURES columns are the flattened (time, features) sequence, the rest
 are static context. The wrapper reshapes internally, so the from-scratch nested
-CV (nested_cv.py) tunes and evaluates it exactly like the others.
+CV (nested_cv.py) tunes and evaluates it exactly like the others. The static
+columns arrive raw (NaN allowed): fit() standardises them with the training
+fold's mean/sd (constant columns zeroed, NaN -> the mean) and predict_proba
+reuses those statistics, so nothing leaks from the test fold.
 
 HYPERPARAMETER (2.f): mem_slots, the number of memory slots, grid {2, 4, 8}
 (middle = 4). More slots = more relational capacity.
@@ -138,6 +144,8 @@ class RelationalRNN:
         self._dev = None
         self._net = None
         self._n_static = None
+        self._mu = None
+        self._sd = None
 
     def _split(self, X):
         """Flat X -> (sequence (N,T,d_step), static (N,n_static))."""
@@ -145,6 +153,23 @@ class RelationalRNN:
         seq = X[:, :cut].reshape(-1, self.history, self.d_step)
         static = X[:, cut:]
         return seq.astype(np.float32), static.astype(np.float32)
+
+    def _fit_scaler(self, static):
+        """Training-fold mean/sd of each static column. A column that is
+        constant on this fold (spread tiny next to its size) gets sd = inf,
+        so it becomes 0 rather than float noise blown up."""
+        with np.errstate(all="ignore"):
+            mu = np.nanmean(static, axis=0)
+            sd = np.nanstd(static, axis=0)
+            spread = np.nanmax(static, axis=0) - np.nanmin(static, axis=0)
+        mu = np.nan_to_num(mu)
+        const = ~(spread > 1e-9 * np.maximum(1.0, np.abs(mu)))
+        self._mu = mu.astype(np.float32)
+        self._sd = np.where(const, np.inf, sd).astype(np.float32)
+
+    def _scale(self, static):
+        z = (static - self._mu) / self._sd
+        return np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
     def fit(self, X, y):
         torch.manual_seed(self.seed)
@@ -157,6 +182,8 @@ class RelationalRNN:
             X, y = X[idx], y[idx]
         seq, static = self._split(X)
         self._n_static = static.shape[1]
+        self._fit_scaler(static)
+        static = self._scale(static)
 
         # internal train/val split for early stopping
         n = len(seq)
@@ -212,6 +239,7 @@ class RelationalRNN:
             raise RuntimeError("Model not fitted.")
         X = np.asarray(X, dtype=np.float32)
         seq, static = self._split(X)
+        static = self._scale(static)
         self._net.eval()
         out = np.empty(len(seq), dtype=np.float32)
         with torch.no_grad():

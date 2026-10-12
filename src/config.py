@@ -86,8 +86,12 @@ PLANTED_DELTAS = [0.0, 0.02, 0.05, 0.10]
 # before the one being predicted (zero-padded at the start of a match, never
 # crossing a match boundary). This is the "60 points of raw history" input.
 RNN_HISTORY = 60
-# Per-point step features in the sequence (see src/sequences.py). Keep in sync.
+# Per-point step features in the sequence (see src/sequences.STEP_FEATURES):
+# valid, p1_won, p1_served, rally_known, rally. Keep in sync.
 RNN_STEP_FEATURES = 5
+# Rally length enters the sequence as log1p(shots) / log1p(RNN_RALLY_SCALE),
+# so a 10-shot rally is 1.0. No cap.
+RNN_RALLY_SCALE = 10
 # Train on at most this many windowed points per fit (the brief allows using a
 # subset for CV/tuning; a neural net inside nested CV is otherwise too slow).
 RNN_MAX_TRAIN = 40_000
