@@ -34,7 +34,8 @@ from ..cross_validation import temporal_match_splits
 from ..nested_cv import nested_cv
 from ..models import logistic_regression, gradient_boosting
 from ..null_shuffle import shuffle_null, MODES
-# from ..models import relational_rnn  # enable when ready
+from ..sequences import build_sequence_matrix
+from ..models import relational_rnn
 
 
 # Per-tour hyperparameter grids (used when men and women get separate models);
@@ -47,8 +48,11 @@ TOUR_GRIDS = {
 MODELS = {
     "logreg": (logistic_regression.make_model, logistic_regression.PARAM_GRID),
     "gboost": (gradient_boosting.make_model, gradient_boosting.PARAM_GRID),
-    # "rmc":    (relational_rnn.make_model, relational_rnn.PARAM_GRID),
+    "rmc":    (relational_rnn.make_model, relational_rnn.PARAM_GRID),
 }
+
+# Models whose input is the raw point sequence rather than the tabular features.
+SEQUENCE_MODELS = {"rmc"}
 
 
 SLAM_ORDER = {"ausopen": 0, "frenchopen": 1, "wimbledon": 2, "usopen": 3}
@@ -69,13 +73,15 @@ def tour_of(match_ids: pd.Series) -> pd.Series:
     return first.map({"1": "men", "M": "men", "2": "women", "W": "women"})
 
 
-def _nested_cv_all_models(X, y, match_ids, label: str, tour: str | None = None) -> dict:
+def _nested_cv_all_models(X, X_seq, y, match_ids, label: str,
+                          tour: str | None = None) -> dict:
     ordered = matches_in_time_order(match_ids.tolist())
     splits = temporal_match_splits(ordered, n_parts=N_OUTER_REPEATS + 1)
     results = {}
     for name, (make, grid) in MODELS.items():
         grid = TOUR_GRIDS.get(name, {}).get(tour, grid)
-        res = nested_cv(make, grid, X, y, match_ids, splits)
+        Xm = X_seq if name in SEQUENCE_MODELS else X   # RNN reads the raw sequence
+        res = nested_cv(make, grid, Xm, y, match_ids, splits)
         results[name] = {
             "grid": grid,
             "summary": res["summary"],
@@ -93,16 +99,18 @@ def _run_one(points: pd.DataFrame, label: str, by_tour: bool = True) -> dict:
     """Nested CV for every model; one set of models per tour unless pooled."""
     feats = build_features(points, player_won_col="p1_won")
     X = feats[FEATURE_COLUMNS].fillna(0.0).to_numpy()
+    X_seq = build_sequence_matrix(feats)              # raw sequence for the RNN
     y = feats["p1_won"].to_numpy()
     match_ids = feats["match_id"].to_numpy()
     if not by_tour:
-        return _nested_cv_all_models(X, y, match_ids, label)
+        return _nested_cv_all_models(X, X_seq, y, match_ids, label)
 
     tours = tour_of(feats["match_id"]).to_numpy()
     results = {}
     for tour in ("men", "women"):
         m = tours == tour
-        results[tour] = _nested_cv_all_models(X[m], y[m], match_ids[m], f"{label}/{tour}", tour)
+        results[tour] = _nested_cv_all_models(
+            X[m], X_seq[m], y[m], match_ids[m], f"{label}/{tour}", tour)
     return results
 
 
