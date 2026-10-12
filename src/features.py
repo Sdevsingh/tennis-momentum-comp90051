@@ -13,8 +13,10 @@ Each function appends columns to the per-match frame and returns it. Compose
 them in `build_features`.
 
 Every feature has a FeatureScope: MATCH (built only from information before
-the match) or POINT (updated during the match). `feature_columns(scope)`
-returns one group; FEATURE_COLUMNS is all of them.
+the match), POINT_STRUCTURE (updated during the match, no memory of earlier
+points: who is serving) or POINT_MEMORY (updated from the points already
+played, including the score). `feature_columns(scope)` returns one group
+("point" = both in-match groups); FEATURE_COLUMNS is all of them.
 """
 from __future__ import annotations
 
@@ -550,11 +552,19 @@ class FeatureScope(str, Enum):
            p_serve_expected, expected_p1_win, ...) are the same pre-match
            values seen from whoever is serving, so they flip with the serve
            but are never updated by what happens in the match.
-    POINT  updated during the match: built from points already played, or
-           the state of the current point (who is serving, the score).
+    POINT_STRUCTURE  updated during the match but carrying no memory of
+                     earlier points: only who is serving.
+    POINT_MEMORY     updated during the match from the points already
+                     played. Includes the score and everything read off it
+                     (game/set score, break/game/set point, tiebreak), point
+                     counts and court side, breaks, serve and win-rate
+                     summaries, rally summaries and rally-data coverage.
+    POINT_STRUCTURE + POINT_MEMORY are the in-match features (POINT_FEATURES,
+    feature_columns("point")).
     """
     MATCH = "match"
-    POINT = "point"
+    POINT_STRUCTURE = "point_structure"
+    POINT_MEMORY = "point_memory"
 
 
 # Computed (other features are built from them) but not given to the models:
@@ -598,16 +608,30 @@ POINT_FEATURES = (
 )
 POINT_FEATURES = [c for c in POINT_FEATURES if c not in EXCLUDED_FEATURES]
 
+# In-match features with no memory of earlier points; every other in-match
+# feature is memory (see FeatureScope).
+POINT_STRUCTURE_FEATURES = ["server_is_p1"]
+POINT_MEMORY_FEATURES = [c for c in POINT_FEATURES if c not in POINT_STRUCTURE_FEATURES]
+
 FEATURE_SCOPE: dict[str, FeatureScope] = {
     **{c: FeatureScope.MATCH for c in MATCH_FEATURES},
-    **{c: FeatureScope.POINT for c in POINT_FEATURES},
+    **{c: FeatureScope.POINT_STRUCTURE for c in POINT_STRUCTURE_FEATURES},
+    **{c: FeatureScope.POINT_MEMORY for c in POINT_MEMORY_FEATURES},
 }
 
 FEATURE_COLUMNS = MATCH_FEATURES + POINT_FEATURES
 
 
-def feature_columns(scope: FeatureScope | None = None) -> list[str]:
-    """All feature columns, or only those of one scope."""
+def feature_columns(scope: FeatureScope | str | None = None) -> list[str]:
+    """All feature columns, or only those of one scope.
+
+    `scope` is a FeatureScope (or its value, e.g. "point_memory"), or
+    "point" for both in-match groups (POINT_STRUCTURE + POINT_MEMORY).
+    """
     if scope is None:
         return list(FEATURE_COLUMNS)
+    if scope == "point":
+        return [c for c in FEATURE_COLUMNS
+                if FEATURE_SCOPE[c] is not FeatureScope.MATCH]
+    scope = FeatureScope(scope)
     return [c for c in FEATURE_COLUMNS if FEATURE_SCOPE[c] is scope]
