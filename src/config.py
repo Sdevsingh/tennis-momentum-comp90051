@@ -92,9 +92,10 @@ RNN_STEP_FEATURES = 5
 # Rally length enters the sequence as log1p(shots) / log1p(RNN_RALLY_SCALE),
 # so a 10-shot rally is 1.0. No cap.
 RNN_RALLY_SCALE = 10
-# Train on at most this many windowed points per fit (the brief allows using a
-# subset for CV/tuning; a neural net inside nested CV is otherwise too slow).
-RNN_MAX_TRAIN = 40_000
+# Optional cap on training points per fit (a random subset). None = train on
+# the whole training fold, like the other models. A 40k cap cost the men's
+# model ~0.004 log-loss against LR/LightGBM in exp1.
+RNN_MAX_TRAIN = None
 RNN_EPOCHS = 8
 RNN_BATCH = 512
 RNN_LR = 1e-3

@@ -37,9 +37,9 @@ Intel Arc (xpu) or Apple (mps) -- else the CPU (config.RNN_DEVICE, or the
 TENNIS_RNN_DEVICE environment variable). The training data is moved to the
 device once per fit; predictions come back as numpy, so nested CV is unchanged.
 
-COMPUTE: a net inside nested CV is expensive, so fit() trains on at most
-RNN_MAX_TRAIN windowed points (the brief allows a subset for CV/tuning), with a
-small net, few epochs and early stopping on an internal split. We never report
+COMPUTE: fit() trains on the whole training fold by default, with a small
+net, few epochs and early stopping on an internal split. RNN_MAX_TRAIN (or
+max_train) can cap it to a random subset when time matters. We never report
 loss-vs-epochs (2.g forbids it); epochs are only a training detail.
 """
 from __future__ import annotations
@@ -125,7 +125,7 @@ class RelationalRNN:
     def __init__(self, mem_slots: int = 4, head_size: int = 16, n_heads: int = 2,
                  history: int = RNN_HISTORY, d_step: int = RNN_STEP_FEATURES,
                  n_epochs: int = RNN_EPOCHS, lr: float = RNN_LR,
-                 batch: int = RNN_BATCH, max_train: int = RNN_MAX_TRAIN,
+                 batch: int = RNN_BATCH, max_train: int | None = RNN_MAX_TRAIN,
                  seed: int = SEED, device: str | None = None):
         if not _TORCH:
             raise ImportError("PyTorch is required for the Relational RNN "
@@ -176,8 +176,8 @@ class RelationalRNN:
         rng = np.random.default_rng(self.seed)
         X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=np.float32)
-        # subsample for tractable training inside nested CV
-        if len(X) > self.max_train:
+        # optional subsample (max_train=None trains on everything)
+        if self.max_train is not None and len(X) > self.max_train:
             idx = rng.choice(len(X), self.max_train, replace=False)
             X, y = X[idx], y[idx]
         seq, static = self._split(X)
