@@ -509,6 +509,26 @@ def link_slam_matches(slam: pd.DataFrame, rated: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def add_handedness(out: pd.DataFrame, archive: Path) -> pd.DataFrame:
+    """p1_left / p2_left: 1 if the linked player is left-handed, 0 if
+    right-handed, NaN if unknown ('U' or no record) or unlinked.
+
+    From the archive's atp_players.csv / wta_players.csv `hand` column, by the
+    tour player id each slam match was linked to. A fixed attribute of the
+    player, so it is pre-match information.
+    """
+    hand = {}
+    for tour in ("atp", "wta"):
+        f = archive / tour / f"{tour}_players.csv"
+        if f.exists():
+            pl = pd.read_csv(f, usecols=["player_id", "hand"], low_memory=False)
+            hand.update({(tour, pid): h for pid, h in zip(pl["player_id"], pl["hand"])})
+    for i in (1, 2):
+        h = [hand.get((t, pid)) for t, pid in zip(out["tour"], out[f"p{i}_player_id"])]
+        out[f"p{i}_left"] = pd.Series(h, index=out.index).map({"L": 1.0, "R": 0.0})
+    return out
+
+
 def load_slam_matches(archive: Path) -> pd.DataFrame:
     files = sorted((archive / "slam_pointbypoint").glob("*-matches.csv"))
     slam = pd.concat([pd.read_csv(f, low_memory=False) for f in files],
@@ -551,6 +571,7 @@ PLAYER_MATCH_FEATURES = (
     + ["elo_diff", "p1_elo_win_prob", "p1_ts_win_prob",
        "log_h2h_matches", "p1_h2h_win_pct", "p1_h2h_share",
        "elo_surface_diff", "p1_elo_surface_win_prob", "p1_ts_surface_win_prob",
+       "p1_left", "p2_left",
        "player_features_known"]
 )
 # Also pre-match information, seen from the current server's side: they flip
@@ -558,6 +579,7 @@ PLAYER_MATCH_FEATURES = (
 PLAYER_SERVER_VIEW_FEATURES = [
     "elo_diff_server", "ts_diff_server", "elo_surface_diff_server",
     "ts_surface_diff_server", "p_serve_expected", "expected_p1_win",
+    "server_left",
 ]
 PLAYER_FEATURES = PLAYER_MATCH_FEATURES + PLAYER_SERVER_VIEW_FEATURES
 
@@ -572,6 +594,9 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
       expected_p1_win                   the same, from player 1's side --
                                         the baseline the surprise feature
                                         measures momentum against.
+      server_left                       1 if the server is left-handed.
+    p1_left / p2_left are each player's hand (1 = left); an unknown hand
+    counts as right-handed (~90% of players).
 
     Matches with no link (or simulated matches) get neutral values
     (medians, equal players) and player_features_known = 0. Not NaN: the
@@ -582,9 +607,10 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
                                  "p1_h2h_wins", "h2h_matches", "p1_h2h_share",
                                  "elo_surface_diff", "p1_elo_surface_win_prob",
                                  "p1_ts_surface_win_prob",
-                                 "p1_serve_expected", "p2_serve_expected"]
+                                 "p1_serve_expected", "p2_serve_expected",
+                                 "p1_left", "p2_left"]
     if path.exists():
-        mf = pd.read_parquet(path)[keep]
+        mf = pd.read_parquet(path).reindex(columns=keep)
     else:
         print(f"  [player_features] {path} not found; run "
               "`python -m src.player_features`. Using neutral values.")
@@ -619,6 +645,8 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
     out["surface"] = out["match_id"].astype(str).str.split("-").str[1].map(SLAM_SURFACE)
     for c in ("p1_serve_expected", "p2_serve_expected"):
         out[c] = out[c].astype(float).fillna(serve_neutral)
+    for c in ("p1_left", "p2_left"):
+        out[c] = out[c].astype(float).fillna(0.0)          # unknown -> right-handed
 
     p1_serving = (out["point_server"] == 1).to_numpy()
     sign = np.where(p1_serving, 1.0, -1.0)
@@ -630,6 +658,7 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
                                        out["p2_serve_expected"])
     out["expected_p1_win"] = np.where(p1_serving, out["p1_serve_expected"],
                                       1.0 - out["p2_serve_expected"])
+    out["server_left"] = np.where(p1_serving, out["p1_left"], out["p2_left"])
     for c in LOG1P_FEATURES:
         for i in (1, 2):
             out[f"p{i}_log_{c}"] = np.log1p(out[f"p{i}_{c}"].astype(float).clip(lower=0))
@@ -653,6 +682,7 @@ def main() -> None:
                       ignore_index=True)
     print(f"Processed {len(rated):,} tour matches.")
     out = link_slam_matches(load_slam_matches(archive), rated)
+    out = add_handedness(out, archive)
 
     out.to_parquet(MATCH_FILE)
     linked = out["p1_elo"].notna()
