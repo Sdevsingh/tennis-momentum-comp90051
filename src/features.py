@@ -30,7 +30,7 @@ from .config import (WINDOW_SIZES, DECAY_RATES, SERVE_GAME_WINDOWS, SERVE_PRIOR_
                      RALLY_NEUTRAL_LEN, RALLY_WINDOW, LONG_RALLY_SHOTS)
 from .player_features import (add_player_features, PLAYER_MATCH_FEATURES,
                               PLAYER_SERVER_VIEW_FEATURES)
-from .tennis_rules import is_tiebreak as _is_tiebreak
+from .tennis_rules import is_tiebreak as _is_tiebreak, tiebreak_rule
 
 
 def _prev_only(series: pd.Series) -> pd.Series:
@@ -410,10 +410,14 @@ def score_context(match: pd.DataFrame) -> pd.DataFrame:
 
     Within-game points give standard tennis pressure flags (deuce/ad handled by
     the "win by 2" test):
-      - is_break_point  the receiver can take the server's game on this point;
-      - is_game_point   the server can hold on this point;
+      - is_break_point  the receiver of this point can win the game on it;
+      - is_game_point   the server of this point can win the game on it;
       - is_set_point    either of those, when that game also decides the set
-        (approx: a leader on >=5 games winning by >=1; ignores 7-6 set points).
+        (a player on >=5 games and ahead wins the set by taking the game, or
+        any tiebreak point that ends the tiebreak).
+    In a tiebreak the "game" is the tiebreak itself (first to the set's
+    tiebreak target, win by two), and the flags refer to whoever serves the
+    point.
 
     Adds the pressure flags (is_break_point, is_set_point, score_diff) plus a
     set of score counters, all POINT-scope.
@@ -451,13 +455,18 @@ def score_context(match: pd.DataFrame) -> pd.DataFrame:
         sp, rp = pts[s], pts[r]
         tiebreak = _is_tiebreak(match_id, set_no[i], games[1], games[2])
 
-        # one-point-away tests (win by 2, min 4 points), skipped in a tiebreak
-        recv_wins = (rp + 1 >= 4) and (rp + 1 - sp >= 2)
-        serv_wins = (sp + 1 >= 4) and (sp + 1 - rp >= 2)
-        bp = int((not tiebreak) and recv_wins)
-        gp = int((not tiebreak) and serv_wins)
-        sp_server = gp and games[s] >= 5 and games[s] - games[r] >= 1
-        sp_recv = bp and games[r] >= 5 and games[r] - games[s] >= 1
+        # one-point-away tests: first to `target` points, win by 2 (4 in a
+        # normal game; the set's tiebreak target in a tiebreak)
+        target = tiebreak_rule(match_id, set_no[i])[1] if tiebreak else 4
+        recv_wins = (rp + 1 >= target) and (rp + 1 - sp >= 2)
+        serv_wins = (sp + 1 >= target) and (sp + 1 - rp >= 2)
+        bp = int(recv_wins)
+        gp = int(serv_wins)
+        if tiebreak:                       # winning the tiebreak wins the set
+            sp_server, sp_recv = gp, bp
+        else:
+            sp_server = gp and games[s] >= 5 and games[s] - games[r] >= 1
+            sp_recv = bp and games[r] >= 5 and games[r] - games[s] >= 1
 
         cols["is_break_point"][i] = bp
         cols["is_game_point"][i] = gp
@@ -577,6 +586,9 @@ EXCLUDED_FEATURES = {
     "games_done_in_set",   # = p1_games_set + p2_games_set
     "elo_diff",            # = p1_elo - p2_elo
     "elo_surface_diff",    # = p1_elo_surface - p2_elo_surface
+    "point_idx_match",     # = p1_serve_points_match + p2_serve_points_match
+    "points_in_game",      # = server_pts_game + receiver_pts_game
+    "set_diff",            # = p1_sets_won - p2_sets_won
 }
 
 MATCH_FEATURES = [c for c in PLAYER_MATCH_FEATURES + PLAYER_SERVER_VIEW_FEATURES

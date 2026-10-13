@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from .config import RAW_DIR, PROCESSED_DIR
-from .tennis_rules import sets_to_win
+from .tennis_rules import sets_to_win, tiebreak_rule
 
 # Canonical names we use downstream -> list of possible source spellings.
 COLUMN_ALIASES = {
@@ -112,36 +112,98 @@ def load_points_file(path: Path) -> pd.DataFrame | None:
     return out.reset_index(drop=True)
 
 
-def corrupt_match_reasons(table: pd.DataFrame) -> dict[str, str]:
-    """Matches whose point log cannot be legal tennis -> the reason.
+def _game_done(a: int, b: int, target: int) -> bool:
+    """Is a game (or tiebreak) to `target` points, win by two, over at a-b?"""
+    return max(a, b) >= target and abs(a - b) >= 2
 
-    - "set number goes backwards": SetNo flip-flops mid-match (e.g. 3, 4,
-      3, 4), so the set structure is unknown;
-    - "too many sets before the deciding set": replaying the log (a game is
-      won by the winner of its last point, a set by whoever has more games
-      when the set number changes) gives a player more sets than the format
-      allows before the last point (men 2, women 1), which means games or
-      points are missing inside a set.
-    Every score-based feature would be wrong for these matches.
+
+def _set_done(g1: int, g2: int, tb_at: int | None) -> bool:
+    hi, lo = max(g1, g2), min(g1, g2)
+    return (hi >= 6 and hi - lo >= 2) or (tb_at is not None and hi == tb_at + 1 and lo == tb_at)
+
+
+def _match_reason(mid: str, set_no, game_no, server, winner, point_no) -> str | None:
+    """Replay one match under the rules; the first way its log breaks them."""
+    if (np.diff(set_no) < 0).any():
+        return "set number goes backwards"
+    key = set_no * 10_000 + game_no
+    starts = np.flatnonzero(np.r_[True, key[1:] != key[:-1]])
+    ends = np.r_[starts[1:], len(key)]
+    if len(np.unique(key)) != len(starts):
+        return "a game appears twice"
+    if point_no is not None and (np.diff(point_no) != 1).any():
+        return "point numbers skip (missing points)"
+
+    sets, games, cur_set, prev_first = {1: 0, 2: 0}, {1: 0, 2: 0}, set_no[0], None
+    for i, (a, b) in enumerate(zip(starts, ends)):
+        last_game = i == len(starts) - 1
+        if set_no[a] != cur_set:
+            if not _set_done(games[1], games[2], tiebreak_rule(mid, cur_set)[0]):
+                return "set ends before it is won"
+            sets[1 if games[1] > games[2] else 2] += 1
+            if max(sets.values()) >= sets_to_win(mid):
+                return "points after the match is over"
+            games, cur_set = {1: 0, 2: 0}, set_no[a]
+        tb_at, tb_target = tiebreak_rule(mid, cur_set)
+        rule_tb = tb_at is not None and games[1] == games[2] == tb_at
+        srv = server[a:b]
+        first = srv[0]
+        if prev_first is not None and first == prev_first:
+            return "server does not alternate"
+        if rule_tb:
+            want = np.array([first if ((j + 1) // 2) % 2 == 0 else 3 - first
+                             for j in range(b - a)])
+            if not (srv == want).all():
+                return "tiebreak serve pattern / tiebreak not where the rules put it"
+        elif (srv != first).any():
+            return "two servers in a normal game"
+        prev_first = first
+        x = y = 0
+        for k in range(a, b):
+            if winner[k] == 1:
+                x += 1
+            else:
+                y += 1
+            if _game_done(x, y, tb_target if rule_tb else 4) and k != b - 1:
+                return "game continues after it is won"
+        if not _game_done(x, y, tb_target if rule_tb else 4) and not last_game:
+            return "game ends before it is won"
+        games[int(winner[b - 1])] += 1
+    return None
+
+
+def corrupt_match_reasons(table: pd.DataFrame) -> dict[str, str]:
+    """Matches whose point log cannot be legal tennis -> the first reason found.
+
+    Every match is replayed from point_winner / point_server under the rules
+    (src/tennis_rules.py: 4-point games won by two, tiebreaks at the set's
+    tiebreak score to the set's target, serve alternating by game and in the
+    tiebreak pattern, sets won at 6 by two or by the tiebreak, best of 5 / 3).
+    A match is corrupt if its log breaks them anywhere: the set number goes
+    backwards, a game appears twice, point numbers skip, a set ends before it
+    is won, points continue after the match is over, the server does not
+    alternate, a normal game has two servers or a tiebreak the wrong pattern
+    (or sits where the rules have no tiebreak), a game continues after it is
+    won, or a game other than the match's last ends before it is won.
+
+    Only the very last game may be unfinished (retirements, logs cut short),
+    so incomplete matches are kept. Every score-based feature would be wrong
+    for the corrupt ones, and the null shuffle would keep their broken games
+    and sets in real order, so they are dropped.
     """
     reasons = {}
-    for mid, m in table.groupby("match_id", sort=False):
-        set_no = m["set_no"].to_numpy()
-        if (np.diff(set_no) < 0).any():
-            reasons[mid] = "set number goes backwards"
-            continue
-        key = list(zip(set_no, m["game_no"].to_numpy()))
-        winners = m["point_winner"].to_numpy()
-        games, sets, cap = {1: 0, 2: 0}, {1: 0, 2: 0}, sets_to_win(mid) - 1
-        for i in range(1, len(m)):
-            if key[i] != key[i - 1]:
-                games[int(winners[i - 1])] += 1
-            if set_no[i] != set_no[i - 1]:
-                sets[1 if games[1] > games[2] else 2] += 1
-                games = {1: 0, 2: 0}
-                if max(sets.values()) > cap:
-                    reasons[mid] = "too many sets before the deciding set"
-                    break
+    pn = pd.to_numeric(table["point_no"], errors="coerce") if "point_no" in table else None
+    for mid, idx in table.groupby("match_id", sort=False).indices.items():
+        m = table.iloc[idx]
+        p = None
+        if pn is not None:
+            p = pn.iloc[idx].to_numpy()
+            if np.isnan(p).any():
+                p = None                 # text point numbers ('0X'): skip the gap check
+        why = _match_reason(mid, m["set_no"].to_numpy(int), m["game_no"].to_numpy(int),
+                            m["point_server"].to_numpy(int), m["point_winner"].to_numpy(int), p)
+        if why:
+            reasons[mid] = why
     return reasons
 
 

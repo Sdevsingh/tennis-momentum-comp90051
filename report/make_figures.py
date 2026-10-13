@@ -94,7 +94,46 @@ def base_vs_full_figure():
     print(f"  wrote {FIGDIR / 'base_vs_full.pdf'}")
 
 
+def shuffle_control_figure(name: str = "exp1_shuffle_control"):
+    """exp1: paired log-loss gain of real over the shuffled null (+ = order
+    helps), per tour and model; bars = seed-averaged null with fold SE, dots =
+    each shuffle seed."""
+    path = RESULTS / f"{name}.json"
+    if not path.exists():
+        print(f"  [skip] {path.name} not found — run exp1 first.")
+        return
+    data = json.loads(path.read_text())
+    if "paired" not in data:
+        print(f"  [skip] {path.name} has no paired results — rerun exp1.")
+        return
+    paired = data["paired"]
+    groups = [g for g in _GROUPS if g in paired]
+    models = list(dict.fromkeys(m for grp in groups for m in paired[grp]))
+
+    fig, ax = plt.subplots(figsize=(3.6, 2.6))
+    width = 0.8 / len(models)
+    for i, model in enumerate(models):
+        x = np.arange(len(groups)) + i * width
+        g = [paired[grp][model]["log_loss"] if model in paired[grp] else None for grp in groups]
+        ax.bar(x, [v["mean"] if v else np.nan for v in g], width,
+               yerr=[v["se"] if v else np.nan for v in g], capsize=3, label=model)
+        for xi, v in zip(x, g):
+            if v:
+                seeds = list(v["per_seed"].values())
+                ax.plot([xi] * len(seeds), seeds, "k.", ms=3, zorder=3)
+    ax.set_xticks(np.arange(len(groups)) + width * (len(models) - 1) / 2, groups)
+    ax.axhline(0, color="grey", lw=0.8)
+    ax.set_ylabel("Log-loss gain, real vs. null")
+    ax.set_title(f"Shuffle control ({data.get('null', 'both')} null)")
+    ax.legend(fontsize=7)
+    fig.tight_layout()
+    out = FIGDIR / f"{name.replace('exp1_', '')}.pdf"
+    fig.savefig(out)
+    print(f"  wrote {out}")
+
+
 if __name__ == "__main__":
+    shuffle_control_figure()
     memory_horizon_figure()
     memory_horizon_figure("exp2_memory_horizon_ewma_truncated")
     base_vs_full_figure()
