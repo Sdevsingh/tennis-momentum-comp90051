@@ -21,6 +21,22 @@ from .config import N_INNER_FOLDS
 from . import metrics
 
 
+def _fit_rows(mask: np.ndarray, match_ids: np.ndarray, ordered_match_ids=None) -> np.ndarray:
+    """Row indices of `mask`, oldest match first when `ordered_match_ids` is given.
+
+    Models get their training rows in time order, so anything a model holds
+    out internally from the END of its rows (the RNN's early stopping) is a
+    later block, like the inner CV. Rows within a match keep playing order.
+    """
+    idx = np.flatnonzero(mask)
+    if ordered_match_ids is not None:
+        pos = {m: i for i, m in enumerate(ordered_match_ids)}
+        uniq, inv = np.unique(match_ids[idx], return_inverse=True)
+        rank = np.array([pos[m] for m in uniq])[inv]
+        idx = idx[np.argsort(rank, kind="stable")]
+    return idx
+
+
 @dataclass
 class TuningResult:
     best_params: dict
@@ -69,6 +85,7 @@ def grid_search(make_model: Callable,
     combo_scores = {tuple(c.items()): [] for c in combos}
     for split in inner_splits:
         tr, te = iter_fold_indices(match_ids, split)
+        tr = _fit_rows(tr, match_ids, ordered_match_ids)
         for c in combos:
             model = make_model(**c)
             model.fit(X[tr], y[tr])
@@ -116,9 +133,11 @@ def nested_cv(make_model: Callable,
 
     for split in outer_splits:
         tr, te = iter_fold_indices(match_ids, split)
+        ordered = split.train_match_ids if temporal_inner else None
+        tr = _fit_rows(tr, match_ids, ordered)
         tuning = grid_search(make_model, param_grid, X[tr], y[tr],
                              match_ids[tr], seed=seed,
-                             ordered_match_ids=split.train_match_ids if temporal_inner else None)
+                             ordered_match_ids=ordered)
         selected_params.append(tuning.best_params)
 
         model = make_model(**tuning.best_params)
