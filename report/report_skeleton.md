@@ -49,7 +49,7 @@ Figures/tables eat page space — plan for **3–4 figures max**, each earning i
 Draft content:
 - Open with the confound, not the hype: serving alternates and stronger players win more, so streaks appear without momentum. State that the question is whether *order* adds predictive information **beyond** server, score/pressure, and player strength, and how far back it reaches.
 - Name the dataset: Sackmann Grand Slam point-by-point, singles since 2011, URL. One line on size after cleaning (fill in real numbers once `data_loading.py` runs).
-- State the three-pronged design in one sentence (shuffle control, memory horizon, planted-momentum control).
+- State the three-pronged design in one sentence (shuffle control, memory horizon, base vs full).
 
 > **Jean's objection to pre-empt here:** make it unmistakable in the first paragraph that this is *not* "which features classify points well". Frame it as hypothesis-testing with a control.
 
@@ -88,9 +88,9 @@ Four subsections:
 ## 4. Results & Discussion  (~900 words) — Sections 2.g + rubric's critical analysis
 
 **Results (≥3, with error bars — computed from scratch):**
-- **R1 — Shuffle control:** real vs shuffled log-loss/Brier/AUC per model, with error bars. The gap = momentum signal.
+- **R1 — Shuffle control:** real vs shuffled log-loss/Brier/AUC per model. The momentum signal is the paired per-fold gain of real over the seed-averaged null (3 shuffle seeds), with its fold SE and the spread across seeds.
 - **R2 — Memory horizon curve:** metric vs history length, error bars; mark where it flattens.
-- **R3 — Positive control:** detection vs planted δ, establishing the sensitivity floor.
+- **R3 — Base vs full:** each model with pre-match + serve features only vs all features; the paired gain is the whole in-match signal, an upper bound on momentum. Read R1 as a share of it.
 - **R4 (optional):** reset test, or per-subgroup (server/returner, favourite/underdog) breakdown.
 - Learning curves (vs #training samples) are acceptable; "loss vs epochs" is **explicitly not** an acceptable result.
 
@@ -98,7 +98,7 @@ Four subsections:
 - *Why* each model does/doesn't gain from history. (e.g. logistic reg can't model order beyond engineered windows; RNN can but may overfit on a weak signal.)
 - Advantages/disadvantages of each, in the context of the question, grounded in subject material (bias–variance, model-class complexity, regularisation).
 - Alternatives considered and rejected **with reasons** (e.g. Neural Hawkes Process as a self-exciting model; plain LSTM; survival models) — not just a metric table.
-- Interpret honestly: if the real-vs-shuffle gap is within error bars, say momentum is not predictively detectable at this horizon, and lean on the positive control to argue the method *could* have found it.
+- Interpret honestly: if the real-vs-shuffle gap is within error bars, say momentum is not predictively detectable at this horizon, and use R3 to show how much the match situation itself adds. Caveat: the null also removes a court-side (+0.7pp) and a game's-first-point (−0.8pp) serve effect, each under ~3e-5 log-loss, so a gain that small is not momentum.
 
 ## 5. Conclusion  (~150 words)
 
