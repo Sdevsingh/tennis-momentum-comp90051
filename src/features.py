@@ -415,6 +415,10 @@ def score_context(match: pd.DataFrame) -> pd.DataFrame:
       - is_set_point    either of those, when that game also decides the set
         (a player on >=5 games and ahead wins the set by taking the game, or
         any tiebreak point that ends the tiebreak).
+      - is_first_point_game  no point of this game has been played yet.
+        The server wins ~0.8pp less on a game's first point than on its
+        others (same match and set); a linear model cannot build this flag
+        from the point counts, so it is given explicitly.
     In a tiebreak the "game" is the tiebreak itself (first to the set's
     tiebreak target, win by two), and the flags refer to whoever serves the
     point.
@@ -431,6 +435,7 @@ def score_context(match: pd.DataFrame) -> pd.DataFrame:
     # columns to fill
     cols = {c: np.zeros(n, dtype=int) for c in (
         "is_break_point", "is_set_point", "is_game_point", "is_tiebreak",
+        "is_first_point_game",
         "score_diff", "set_diff", "point_idx_match", "cur_set_no",
         "games_done_in_set", "points_in_game", "p1_games_set", "p2_games_set",
         "p1_sets_won", "p2_sets_won", "server_pts_game", "receiver_pts_game")}
@@ -472,6 +477,7 @@ def score_context(match: pd.DataFrame) -> pd.DataFrame:
         cols["is_game_point"][i] = gp
         cols["is_set_point"][i] = int(bool(sp_server or sp_recv))
         cols["is_tiebreak"][i] = int(tiebreak)
+        cols["is_first_point_game"][i] = int(sp + rp == 0)
         cols["score_diff"][i] = games[1] - games[2]       # p1 - p2 games, this set
         cols["set_diff"][i] = sets[1] - sets[2]
         cols["point_idx_match"][i] = i
@@ -613,7 +619,7 @@ POINT_FEATURES = (
        "server_rally_ratio_match"]
     # score-context counters (score_context): running game/set score before
     # each point, plus game-situation pressure flags.
-    + ["is_game_point", "is_tiebreak", "set_diff", "point_idx_match",
+    + ["is_game_point", "is_tiebreak", "is_first_point_game", "set_diff", "point_idx_match",
        "cur_set_no", "games_done_in_set", "points_in_game",
        "p1_games_set", "p2_games_set", "p1_sets_won", "p2_sets_won",
        "server_pts_game", "receiver_pts_game"]
