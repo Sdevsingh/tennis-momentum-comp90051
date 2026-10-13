@@ -124,13 +124,14 @@ momentum is tested as information beyond serving. Men's and women's matches are
 modelled separately throughout.
 
 \subsection{Feature construction}
-Each of the 106 features has a declared scope. \textbf{Pre-match} (58): from all
+Each of the 109 features has a declared scope. \textbf{Pre-match} (61): from all
 tour-level results since 1968, processed in playing order and joined to each
 slam match strictly before it is played --- Elo (FIDE K-factors) and surface
 Elo, TrueSkill with TrueSkill~2-style skill drift, opponent-adjusted serve and
 return skill giving each player's expected serve-point win probability against
-this opponent, rest and recent workload, career experience, recent retirements
-and head-to-head share (heavy-tailed counts log-transformed).
+this opponent, rest and recent workload, career experience, recent retirements,
+head-to-head share (heavy-tailed counts log-transformed), and each player's
+handedness (and the server's).
 \textbf{Structure} (1): who serves the point. \textbf{In-match memory} (47),
 built only from earlier points of the same match: win rates over the last
 $w\in\{1,3,5,10,20\}$ points, exponentially weighted win rates with decay
