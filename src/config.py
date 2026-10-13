@@ -86,11 +86,20 @@ PLANTED_DELTAS = [0.0, 0.02, 0.05, 0.10]
 # before the one being predicted (zero-padded at the start of a match, never
 # crossing a match boundary). This is the "60 points of raw history" input.
 RNN_HISTORY = 60
-# Per-point step features in the sequence (see src/sequences.py). Keep in sync.
+# Per-point step features in the sequence (see src/sequences.STEP_FEATURES):
+# valid, p1_won, p1_served, rally_known, rally. Keep in sync.
 RNN_STEP_FEATURES = 5
-# Train on at most this many windowed points per fit (the brief allows a subset
-# for CV/tuning; a neural net inside nested CV is otherwise too slow).
-RNN_MAX_TRAIN = 40_000
+# Rally length enters the sequence as log1p(shots) / log1p(RNN_RALLY_SCALE),
+# so a 10-shot rally is 1.0. No cap.
+RNN_RALLY_SCALE = 10
+# Optional cap on training points per fit (a random subset). None = train on
+# the whole training fold, like the other models. A 40k cap cost the men's
+# model ~0.004 log-loss against LR/LightGBM in exp1.
+RNN_MAX_TRAIN = None
 RNN_EPOCHS = 8
 RNN_BATCH = 512
 RNN_LR = 1e-3
+# Device for the RNN: "auto" picks cuda (NVIDIA) -> xpu (Intel Arc) -> mps
+# (Apple) -> cpu, whichever this PyTorch build can use. Or force one, e.g.
+# "cpu". The environment variable TENNIS_RNN_DEVICE overrides this.
+RNN_DEVICE = "auto"

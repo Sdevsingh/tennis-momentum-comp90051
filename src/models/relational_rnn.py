@@ -8,9 +8,12 @@ WHY IT FITS THE PROJECT
 A standard LSTM (which the subject covers) squeezes the past into one hidden
 vector. The Relational Memory Core (RMC) keeps a MATRIX of memory slots and, at
 each step, lets them interact through multi-head self-attention before a gated
-update. It reads the RAW point sequence (src/sequences.py), not the engineered
-features, so it can discover order-dependent "momentum" structure the hand-built
-features never encode. That is exactly the research question.
+update. It reads the RAW memory of earlier points (src/sequences.py: who won,
+who served, rally length) instead of the engineered memory features, so it can
+discover order-dependent "momentum" structure the hand-built features never
+encode. That is exactly the research question. Pre-match (MATCH) features and
+the current server (POINT_STRUCTURE) go in as static context, so it is not
+blind to player strength or to who serves.
 
 WHY IT WAS NOT TAUGHT IN CLASS (for the literature review)
 The syllabus covers standard RNN/LSTM; the RMC's defining component -- self
@@ -21,23 +24,33 @@ Matches the other models: fit(X, y) / predict_proba(X). X is the flat sequence
 matrix from src/sequences.build_sequence_matrix: the first RNN_HISTORY *
 RNN_STEP_FEATURES columns are the flattened (time, features) sequence, the rest
 are static context. The wrapper reshapes internally, so the from-scratch nested
-CV (nested_cv.py) tunes and evaluates it exactly like the others.
+CV (nested_cv.py) tunes and evaluates it exactly like the others. The static
+columns arrive raw (NaN allowed): fit() standardises them with the training
+fold's mean/sd (constant columns zeroed, NaN -> the mean) and predict_proba
+reuses those statistics, so nothing leaks from the test fold.
 
 HYPERPARAMETER (2.f): mem_slots, the number of memory slots, grid {2, 4, 8}
 (middle = 4). More slots = more relational capacity.
 
-COMPUTE: a net inside nested CV is expensive, so fit() trains on at most
-RNN_MAX_TRAIN windowed points (the brief allows a subset for CV/tuning), with a
-small net, few epochs and early stopping on the latest ~10% of its training
-matches (a forward split, like the inner CV). We never report
+DEVICE: runs on a GPU when this PyTorch build can see one -- NVIDIA (cuda),
+Intel Arc (xpu) or Apple (mps) -- else the CPU (config.RNN_DEVICE, or the
+TENNIS_RNN_DEVICE environment variable). The training data is moved to the
+device once per fit; predictions come back as numpy, so nested CV is unchanged.
+
+COMPUTE: fit() trains on the whole training fold by default, with a small
+net, few epochs and early stopping on the latest ~10% of its training matches
+(a forward split, like the inner CV). RNN_MAX_TRAIN (or max_train) can cap it
+to a random subset when time matters. We never report
 loss-vs-epochs (2.g forbids it); epochs are only a training detail.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from ..config import (RNN_HISTORY, RNN_STEP_FEATURES, RNN_MAX_TRAIN,
-                      RNN_EPOCHS, RNN_BATCH, RNN_LR, SEED)
+                      RNN_EPOCHS, RNN_BATCH, RNN_LR, RNN_DEVICE, SEED)
 
 try:
     import torch
@@ -47,9 +60,26 @@ except Exception:                                    # torch optional at import
     _TORCH = False
 
 
-def _device():
-    """Use the GPU when available (faster for the RNN), else CPU."""
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def pick_device(preference: str | None = None) -> "torch.device":
+    """cuda -> xpu -> mps -> cpu, the first this PyTorch build can use.
+
+    `preference` (or TENNIS_RNN_DEVICE, or config.RNN_DEVICE) forces one;
+    "auto" means pick. Asking for a device that is not available falls back
+    to the CPU with a warning rather than crashing a long run.
+    """
+    pref = (preference or os.environ.get("TENNIS_RNN_DEVICE") or RNN_DEVICE).lower()
+    available = {
+        "cuda": torch.cuda.is_available(),
+        "xpu": hasattr(torch, "xpu") and torch.xpu.is_available(),
+        "mps": hasattr(torch.backends, "mps") and torch.backends.mps.is_available(),
+        "cpu": True,
+    }
+    if pref == "auto":
+        return torch.device(next(d for d in ("cuda", "xpu", "mps", "cpu") if available[d]))
+    if not available.get(pref, False):
+        print(f"  [relational_rnn] device '{pref}' not available in this PyTorch build; using cpu")
+        return torch.device("cpu")
+    return torch.device(pref)
 
 
 if _TORCH:
@@ -96,8 +126,8 @@ class RelationalRNN:
     def __init__(self, mem_slots: int = 4, head_size: int = 16, n_heads: int = 2,
                  history: int = RNN_HISTORY, d_step: int = RNN_STEP_FEATURES,
                  n_epochs: int = RNN_EPOCHS, lr: float = RNN_LR,
-                 batch: int = RNN_BATCH, max_train: int = RNN_MAX_TRAIN,
-                 seed: int = SEED):
+                 batch: int = RNN_BATCH, max_train: int | None = RNN_MAX_TRAIN,
+                 seed: int = SEED, device: str | None = None):
         if not _TORCH:
             raise ImportError("PyTorch is required for the Relational RNN "
                               "(pip install torch).")
@@ -111,8 +141,12 @@ class RelationalRNN:
         self.batch = batch
         self.max_train = max_train
         self.seed = seed
+        self.device = device
+        self._dev = None
         self._net = None
         self._n_static = None
+        self._mu = None
+        self._sd = None
 
     def _split(self, X):
         """Flat X -> (sequence (N,T,d_step), static (N,n_static))."""
@@ -121,22 +155,41 @@ class RelationalRNN:
         static = X[:, cut:]
         return seq.astype(np.float32), static.astype(np.float32)
 
+    def _fit_scaler(self, static):
+        """Training-fold mean/sd of each static column. A column that is
+        constant on this fold (spread tiny next to its size) gets sd = inf,
+        so it becomes 0 rather than float noise blown up."""
+        with np.errstate(all="ignore"):
+            mu = np.nanmean(static, axis=0)
+            sd = np.nanstd(static, axis=0)
+            spread = np.nanmax(static, axis=0) - np.nanmin(static, axis=0)
+        mu = np.nan_to_num(mu)
+        const = ~(spread > 1e-9 * np.maximum(1.0, np.abs(mu)))
+        self._mu = mu.astype(np.float32)
+        self._sd = np.where(const, np.inf, sd).astype(np.float32)
+
+    def _scale(self, static):
+        z = (static - self._mu) / self._sd
+        return np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
     def fit(self, X, y):
         torch.manual_seed(self.seed)
         rng = np.random.default_rng(self.seed)
         X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=np.float32)
-        # subsample for tractable training inside nested CV
-        if len(X) > self.max_train:
+        # optional subsample (max_train=None trains on everything)
+        if self.max_train is not None and len(X) > self.max_train:
             idx = np.sort(rng.choice(len(X), self.max_train, replace=False))  # keep row order
             X, y = X[idx], y[idx]
         seq, static = self._split(X)
         self._n_static = static.shape[1]
+        self._fit_scaler(static)
+        static = self._scale(static)
 
         # Early-stopping split, forward in time like the inner CV: nested_cv
         # passes rows oldest first, so validate on the LAST ~10% of rows. The
-        # cut moves to the next match start (a row with no history yet) so no
-        # match is on both sides.
+        # cut moves to the next match start (a row with no history yet: an
+        # all-zero sequence, valid flag included) so no match is on both sides.
         n = len(seq)
         cut = n - max(1, int(0.1 * n))
         starts = np.flatnonzero(~seq.reshape(n, -1).any(axis=1))
@@ -145,23 +198,25 @@ class RelationalRNN:
             cut = int(later[0])
         tr, val = np.arange(cut), np.arange(cut, n)
 
-        dev = _device()
-        self._dev = dev
+        dev = self._dev = pick_device(self.device)
+        if dev.type == "cuda":
+            torch.cuda.manual_seed_all(self.seed)
         self._net = _RMC(self.d_step, self._n_static, self.mem_slots,
                          self.head_size, self.n_heads).to(dev)
         opt = torch.optim.Adam(self._net.parameters(), lr=self.lr)
         loss_fn = nn.BCEWithLogitsLoss()
+        # the whole (subsampled) training set goes to the device once
+        seq_t = torch.from_numpy(seq).to(dev)
+        static_t = torch.from_numpy(static).to(dev)
+        y_t = torch.from_numpy(y).to(dev)
+        val_t = torch.from_numpy(val).to(dev)
 
         def batches(ix):
+            ix = torch.from_numpy(ix).to(dev)
             for s in range(0, len(ix), self.batch):
                 b = ix[s:s + self.batch]
-                yield (torch.from_numpy(seq[b]).to(dev),
-                       torch.from_numpy(static[b]).to(dev),
-                       torch.from_numpy(y[b]).to(dev))
+                yield seq_t[b], static_t[b], y_t[b]
 
-        val_seq = torch.from_numpy(seq[val]).to(dev)
-        val_static = torch.from_numpy(static[val]).to(dev)
-        val_y = torch.from_numpy(y[val]).to(dev)
         best_val, best_state, patience = float("inf"), None, 0
         for _ in range(self.n_epochs):
             self._net.train()
@@ -173,7 +228,8 @@ class RelationalRNN:
             # validation loss for early stopping (NOT reported as a result)
             self._net.eval()
             with torch.no_grad():
-                vl = loss_fn(self._net(val_seq, val_static), val_y).item()
+                vl = loss_fn(self._net(seq_t[val_t], static_t[val_t]),
+                             y_t[val_t]).item()
             if vl < best_val - 1e-4:
                 best_val, best_state, patience = vl, {
                     k: v.clone() for k, v in self._net.state_dict().items()}, 0
@@ -190,15 +246,14 @@ class RelationalRNN:
             raise RuntimeError("Model not fitted.")
         X = np.asarray(X, dtype=np.float32)
         seq, static = self._split(X)
-        dev = getattr(self, "_dev", _device())
+        static = self._scale(static)
         self._net.eval()
         out = np.empty(len(seq), dtype=np.float32)
         with torch.no_grad():
             for s in range(0, len(seq), self.batch):
-                sb = torch.from_numpy(seq[s:s + self.batch]).to(dev)
-                stb = torch.from_numpy(static[s:s + self.batch]).to(dev)
-                out[s:s + self.batch] = torch.sigmoid(
-                    self._net(sb, stb)).cpu().numpy()
+                sb = torch.from_numpy(seq[s:s + self.batch]).to(self._dev)
+                stb = torch.from_numpy(static[s:s + self.batch]).to(self._dev)
+                out[s:s + self.batch] = torch.sigmoid(self._net(sb, stb)).cpu().numpy()
         return out
 
 
