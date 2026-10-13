@@ -15,7 +15,7 @@ How to run (the brief asks for a short Readme.txt like this)
 4. Run the experiments:
      python -m src.experiments.exp1_shuffle_control    # real vs no-momentum null
      python -m src.experiments.exp2_memory_horizon     # how far back memory reaches
-     python -m src.experiments.exp3_positive_control   # planted-momentum sensitivity
+     python -m src.experiments.exp3_base_vs_full       # pre-match + serve only vs full model
    -> each writes a JSON of results to results/.
 
 5. Figures for the report are plotted from the results/*.json files

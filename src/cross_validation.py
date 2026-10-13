@@ -62,8 +62,8 @@ def kfold_match_splits(match_ids: list[str], k: int = 10,
                        seed: int = 51) -> list[Split]:
     """Plain k-fold over matches (non-temporal).
 
-    Only for the simulated positive-control data, where there is no real time
-    axis to respect. k >= 10 per the brief.
+    Only for data with no real time axis to respect (e.g. simulated
+    matches). k >= 10 per the brief.
     """
     rng = np.random.default_rng(seed)
     ids = np.array(match_ids)

@@ -79,8 +79,6 @@ SERVE_ETA0 = 10
 SERVE_ETA_MIN = 0.05
 SERVE_AVG_ALPHA = 0.0005  # running tour-average serve points won
 
-# Positive-control planted momentum sizes (bump to next-point win prob after a streak).
-PLANTED_DELTAS = [0.0, 0.02, 0.05, 0.10]
 
 # --- Relational RNN (complex model) ---
 # Length of the raw point sequence fed to the RNN: the last RNN_HISTORY points
