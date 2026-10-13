@@ -75,7 +75,7 @@ most main-draw singles matches at the four majors since 2011
 (\url{https://github.com/JeffSackmann/tennis_slam_pointbypoint}). Each row is one
 point, with the server, the point winner, set/game/point indices, running score,
 and --- where available --- rally length, serve speed, and ace/winner/unforced-error
-flags. After cleaning we retain \ph{N} points across \ph{M} matches.
+flags. After cleaning we retain 1{,}867{,}642 points across 10{,}284 matches.
 
 \section{Literature review}
 \textbf{Dataset.} The Sackmann collection \cite{sackmann} is scraped from the
@@ -111,77 +111,91 @@ past events recovers momentum structure the hand-crafted features miss.
 
 \section{Methods}
 \subsection{Preprocessing and targets}
-We parse every \texttt{*-points.csv}, normalise heterogeneous column names to a
-canonical schema at load time, and drop points with no valid winner (data gaps).
-Points are ordered within each match by set/game/point index. We define two
-targets: \textbf{p1\_won} (did player~1 win the point) and the serve-adjusted
-\textbf{server\_won}; momentum is tested as information beyond the latter.
-Crucially, all history-based features for a point use \emph{only} points strictly
-earlier in the same match, so no label leaks into its own predictors, and history
-never crosses match boundaries.
+We parse the 49 tournament files (2011--2024), normalise their column names to
+one schema, decode rally length (the serve counts as shot~1; an ace is one shot,
+a double fault zero), and drop points with no valid winner. Every match is then
+replayed from its point winners and servers under the event's rules (scoring,
+serve alternation, tiebreak format, best-of-5/3), and a match whose log breaks
+them anywhere --- a game ending undecided or continuing after it is won, the
+wrong server, a missing point --- is dropped (224 matches, 2.3\% of points),
+because its score features would be wrong. Retirements are kept. The target is
+\textbf{p1\_won}, whether player~1 wins the point; the server is an input, so
+momentum is tested as information beyond serving. Men's and women's matches are
+modelled separately throughout.
 
 \subsection{Feature construction}
-Simple preprocessing alone is disallowed and, more importantly, insufficient to
-capture order. From the raw point stream we construct: rolling win rates over
-the last $w\in\{1,3,5,10,20\}$ points; exponentially-weighted win rates at
-several decay rates $d\in\{0.5,0.7,0.85,0.95\}$ (effective memory $\approx
-1/(1-d)$, giving short- to long-memory views); a signed current-streak length;
-pressure indicators derived from the score (break point, set point, deciding
-set, game/set differential); and, as controls, the server indicator and a
-rolling player-strength proxy. The key non-obvious feature is \textbf{surprise}:
-an exponentially-weighted average of (outcome $-$ expected win probability),
-where the expectation comes from a server-and-score-only baseline fitted on the
-training fold. Surprise measures momentum as a \emph{departure from what serve
-and score already predict}, separating genuine sequential effect from the
-mechanical advantage of serving. Window $\times$ server and decay $\times$
-pressure interactions expand the design matrix past the required feature count.
+Each of the 106 features has a declared scope. \textbf{Pre-match} (58): from all
+tour-level results since 1968, processed in playing order and joined to each
+slam match strictly before it is played --- Elo (FIDE K-factors) and surface
+Elo, TrueSkill with TrueSkill~2-style skill drift, opponent-adjusted serve and
+return skill giving each player's expected serve-point win probability against
+this opponent, rest and recent workload, career experience, recent retirements
+and head-to-head share (heavy-tailed counts log-transformed).
+\textbf{Structure} (1): who serves the point. \textbf{In-match memory} (47),
+built only from earlier points of the same match: win rates over the last
+$w\in\{1,3,5,10,20\}$ points, exponentially weighted win rates with decay
+$d\in\{0.5,0.7,0.85,0.95\}$ (memory $\approx1/(1-d)$ points), a signed streak,
+each player's serve win rate over their last 2 and 4 service games and in the
+match, a Bayesian estimate of the server's serve probability (prior from
+pre-match form, updated point by point), breaks, the score and pressure flags
+(break, game and set point, including tiebreaks; tiebreak; first point of a
+game; court side) and rally-length summaries normalised to earlier editions of
+the same slam. The key feature is \textbf{surprise}: an exponentially weighted
+average of (outcome $-$ pre-match expected win probability for this server
+against this returner), i.e.\ momentum as a \emph{departure from what serve and
+strength already predict}. Eight features that are exact sums or differences of
+others (e.g.\ set difference) are computed but withheld, so the design matrix is
+not singular. Leakage was tested by flipping single point outcomes: no feature at
+or before the flipped point changes.
 
 \subsection{Three algorithms of increasing complexity}
-We compare models spanning the model-complexity spectrum, all evaluated on
-identical cross-validation folds for fairness.
+All three are evaluated on identical folds. Library code is used only for the
+learners; cross-validation, tuning and metrics are our own.
 \begin{itemize}
-\item \textbf{Simple --- $\ell_2$ logistic regression}, implemented from scratch
-with batch gradient descent. Linear in the engineered features; cannot represent
-order beyond what the features encode. Tuned hyperparameter: regularisation
-strength $\lambda$.
-\item \textbf{Medium --- gradient-boosted trees} on the same features, capturing
-non-linear feature interactions (e.g.\ streaks that matter only under pressure).
-Tuned hyperparameter: number of boosting rounds.
-\item \textbf{Complex --- Relational RNN} \cite{santoro2018}, which reads the
-\emph{raw sequence} of recent points rather than the engineered features, and so
-can in principle discover sequential structure the features omit. Tuned
-hyperparameter: number of memory slots.
+\item \textbf{Simple --- $\ell_2$ logistic regression} (scikit-learn, L-BFGS),
+on features standardised with training-fold statistics. Linear in the engineered
+features. Tuned: penalty $\lambda$ (men $\{0.001,0.01,0.1\}$, women
+$\{0.03,0.1,0.3\}$).
+\item \textbf{Medium --- gradient-boosted trees} (LightGBM; depth 3, learning
+rate 0.1) on the same features, capturing interactions (e.g.\ streaks that matter
+only under pressure). Tuned: number of trees (men $\{20,40,80\}$, women
+$\{10,20,40\}$).
+\item \textbf{Complex --- Relational RNN} \cite{santoro2018}. Instead of the
+engineered memory features it reads the \emph{raw} last 60 points of the match
+(who won, who served, rally length, padding flag) alongside the pre-match and
+structure features, so it can find order the features never encode. Tuned:
+memory slots $\{2,4,8\}$. Trained on a GPU with deterministic kernels, with
+early stopping on the latest 10\% of its training matches.
 \end{itemize}
-The simple and medium models share inputs, so any difference between them is
-attributable to model class; the complex model changes the input representation,
-so comparing it against the others isolates the value of learning from the raw
-sequence.
+Logistic regression and boosting share inputs, so a difference between them is
+due to model class; the RNN changes the input representation, isolating the
+value of learning from the raw sequence.
 
 \subsection{Cross-validation (from scratch)}
-Because the data is temporal, evaluation must predict the future from the past;
-random point-level splitting would leak the very sequential signal under study.
-We implement, without third-party libraries, a temporal match-level scheme: the
-time-ordered matches are cut into $11$ contiguous blocks and repetition~$r$
-trains on block~$r$ and tests on block~$r{+}1$, giving $10$ repetitions. Splits
-are at the match level (an entire match is train or test, never both). The same
-splits are used for all three models, and the $10$ repetitions supply the error
-bars reported throughout.
+Evaluation must predict the future from the past; random point-level splitting
+would leak the very sequential signal under study. Matches are put in playing
+order (year, then Australian Open, Roland Garros, Wimbledon, US Open, then
+round) and cut into $11$ contiguous blocks of equal size; repetition~$r$ trains
+on block~$r$ and tests on block~$r{+}1$, a sliding window giving $10$
+repetitions. A match is wholly in train or test. Adjacent repetitions share a
+block, so their scores are correlated and the error bars are somewhat optimistic.
 
 \subsection{Nested cross-validation and tuning (from scratch)}
-Hyperparameters are selected by an inner cross-validation nested inside each
-outer training fold, implemented from scratch: within the outer training block we
-run $k{=}3$ match-level folds, score each candidate value by inner log-loss, refit
-the best on the full outer-training block, and evaluate once on the untouched
-outer-test block. Each grid has $\geq 3$ values and is centred so the middle
-value should win most often; we report the selection frequencies and widen any
-grid whose extreme value dominates.
+Inside each outer training block, matches stay in time order and the inner folds
+are forward-chaining: each of $3$ inner folds trains on the earliest part of the
+block and validates on the next part. Each candidate value is scored by mean
+inner log-loss, the best is refit on the whole outer training block, and it is
+evaluated once on the untouched outer test block. Every grid has $3$ values,
+centred so that the middle one should win; we report how often each value is
+chosen.
 
 \subsection{Evaluation metrics (from scratch)}
-We compute log-loss, Brier score, accuracy, AUC (via the rank identity), and
-calibration curves ourselves; third-party metric functions are not used. Log-loss
-and Brier are the primary metrics because the question concerns probability
-quality, not hard classification. Learning curves are reported against training-set
-size (not against epochs, which the brief excludes).
+We compute log-loss, Brier score, AUC (via the rank identity), accuracy and
+calibration bins ourselves; they agree with reference implementations to within
+$10^{-7}$. Log-loss and Brier are primary because the question concerns
+probability quality. Comparisons between conditions on the same folds (real
+vs.\ shuffled, full vs.\ base) are \emph{paired} per fold. We do not report loss
+against training epochs.
 
 \section{Results and discussion}
 \emph{All numeric cells below are placeholders (\ph{in red}) to be replaced by the
@@ -294,7 +308,7 @@ real-over-null gain rather than explain it; a gain of that size or smaller
 should not be read as momentum.
 
 \textbf{Advantages and disadvantages.} The engineered-feature models are
-interpretable and cheap, and their coefficients/importances say \emph{which}
+interpretable and cheap, and their coefficients and importances say \emph{which}
 horizon of history matters, but they can only find momentum we thought to encode.
 The Relational RNN needs no feature guess and can model interactions among
 distant points, at the cost of interpretability, higher variance, and far greater
