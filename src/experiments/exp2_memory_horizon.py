@@ -59,6 +59,7 @@ from ..features import build_features, FeatureScope, feature_columns, FEATURE_CO
 from ..cross_validation import temporal_match_splits
 from ..nested_cv import nested_cv
 from ..models import logistic_regression, gradient_boosting
+from ..predictions import point_keys, prediction_frame, save_predictions
 from .exp1_shuffle_control import TOUR_GRIDS, matches_in_time_order, tour_of
 
 
@@ -167,8 +168,11 @@ def feature_cols_for_history(h: int | str, ewma: str = "lookback") -> list[str]:
 
 
 def horizon_curve(feats: pd.DataFrame, y: np.ndarray, match_ids: np.ndarray,
-                  splits, make, grid, label: str, ewma: str = "lookback") -> dict:
-    """Nested-CV score at each history length for one model."""
+                  splits, make, grid, label: str, ewma: str = "lookback",
+                  frames: list | None = None, labels: dict | None = None) -> dict:
+    """Nested-CV score at each history length for one model. Out-of-fold
+    predictions are appended to `frames` (with `labels` and H) when given."""
+    keys = point_keys(feats) if frames is not None else None
     curve = {}
     for h in HISTORY_LENGTHS:
         cols = feature_cols_for_history(h, ewma)
@@ -177,6 +181,8 @@ def horizon_curve(feats: pd.DataFrame, y: np.ndarray, match_ids: np.ndarray,
             F = F.assign(**truncated_ewma_columns(feats, h))[cols]
         X = F.fillna(0.0).to_numpy()
         res = nested_cv(make, grid, X, y, match_ids, splits)
+        if frames is not None:
+            frames.append(prediction_frame(res, keys, **(labels or {}), H=h, ewma=ewma))
         s = res["summary"]
         curve[str(h)] = {
             "n_features": len(cols),
@@ -192,7 +198,8 @@ def horizon_curve(feats: pd.DataFrame, y: np.ndarray, match_ids: np.ndarray,
     return curve
 
 
-def _run(feats: pd.DataFrame, label: str, tour: str | None, ewma: str = "lookback") -> dict:
+def _run(feats: pd.DataFrame, label: str, tour: str | None, ewma: str = "lookback",
+         frames: list | None = None) -> dict:
     y = feats["p1_won"].to_numpy()
     match_ids = feats["match_id"].to_numpy()
     ordered = matches_in_time_order(match_ids.tolist())   # year, then AO, RG, Wimbledon, USO
@@ -202,7 +209,8 @@ def _run(feats: pd.DataFrame, label: str, tour: str | None, ewma: str = "lookbac
         grid = TOUR_GRIDS.get(name, {}).get(tour, grid)
         out[name] = {"grid": grid,
                      "curve": horizon_curve(feats, y, match_ids, splits, make, grid,
-                                            f"{label}/{name}", ewma)}
+                                            f"{label}/{name}", ewma, frames,
+                                            {"tour": tour or "pooled", "model": name})}
     return out
 
 
@@ -219,7 +227,9 @@ def main() -> None:
     pts = pd.read_parquet(PROCESSED_DIR / "points.parquet")
     feats = build_features(pts, player_won_col="p1_won")
     del pts
-    feats = feats[["match_id", "p1_won"] + feature_cols_for_history("match")]
+    feats = feats[["match_id", "p1_won", "set_no", "game_no", "point_server"]
+                  + feature_cols_for_history("match")]
+    frames: list = []
 
     results = {"by_tour": not args.pooled,
                "ewma": args.ewma,
@@ -231,15 +241,16 @@ def main() -> None:
                "memory_lookback": {c: (None if math.isinf(v) else v)
                                    for c, v in MEMORY_LOOKBACK.items()}}
     if args.pooled:
-        results["pooled"] = _run(feats, "pooled", None, args.ewma)
+        results["pooled"] = _run(feats, "pooled", None, args.ewma, frames)
     else:
         tours = tour_of(feats["match_id"]).to_numpy()
         for tour in ("men", "women"):
-            results[tour] = _run(feats[tours == tour], tour, tour, args.ewma)
+            results[tour] = _run(feats[tours == tour], tour, tour, args.ewma, frames)
 
     suffix = ("_pooled" if args.pooled else "") + ("_ewma_truncated" if args.ewma == "truncated" else "")
     dest = RESULTS_DIR / f"exp2_memory_horizon{suffix}.json"
     dest.write_text(json.dumps(results, indent=2))
+    save_predictions(frames, dest.stem)
     print(f"\nWrote {dest}")
     print("Plot metric vs H with error bars, per model and tour; mark where it "
           "flattens (the horizon). H='match' should reproduce exp1's real result.")

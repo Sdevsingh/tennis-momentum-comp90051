@@ -36,6 +36,7 @@ from ..sequences import build_sequence_matrix
 from ..cross_validation import temporal_match_splits
 from ..nested_cv import nested_cv
 from ..models import logistic_regression, gradient_boosting
+from ..predictions import point_keys, prediction_frame, save_predictions
 from .exp1_shuffle_control import TOUR_GRIDS, matches_in_time_order, tour_of
 
 
@@ -66,15 +67,17 @@ def paired_gain(base: dict, full: dict) -> dict:
     return out
 
 
-def _cv(make, grid, X, y, match_ids, splits) -> dict:
+def _cv(make, grid, X, y, match_ids, splits, frames=None, keys=None, **labels) -> dict:
     res = nested_cv(make, grid, X, y, match_ids, splits)
+    if frames is not None and keys is not None:
+        frames.append(prediction_frame(res, keys, **labels))
     return {"summary": res["summary"], "per_split": res["per_split"],
             "centring": {k: {str(v): n for v, n in c.items()}
                          for k, c in res["centring"].items()}}
 
 
 def _run(X_base, X_full, X_seq, y, match_ids, label: str, tour: str | None,
-         models: dict) -> dict:
+         models: dict, keys: pd.DataFrame | None = None, frames: list | None = None) -> dict:
     ordered = matches_in_time_order(match_ids.tolist())
     splits = temporal_match_splits(ordered, n_parts=N_OUTER_REPEATS + 1)
     out = {}
@@ -86,8 +89,10 @@ def _run(X_base, X_full, X_seq, y, match_ids, label: str, tour: str | None,
             Xf = X_seq
         else:
             Xb, Xf = X_base, X_full
-        base = _cv(make, grid, Xb, y, match_ids, splits)
-        full = _cv(make, grid, Xf, y, match_ids, splits)
+        base = _cv(make, grid, Xb, y, match_ids, splits, frames, keys,
+                   tour=tour or "pooled", model=name, variant="base")
+        full = _cv(make, grid, Xf, y, match_ids, splits, frames, keys,
+                   tour=tour or "pooled", model=name, variant="full")
         gain = paired_gain(base["per_split"], full["per_split"])
         out[name] = {"grid": grid, "base": base, "full": full, "gain_full_over_base": gain}
         print(f"  [{label}/{name}] base log_loss={base['summary']['log_loss']['mean']:.4f}  "
@@ -121,21 +126,25 @@ def main() -> None:
     y = feats["p1_won"].to_numpy()
     match_ids = feats["match_id"].to_numpy()
     tours = tour_of(feats["match_id"]).to_numpy()
+    keys = point_keys(feats)
+    frames: list = []
     del feats
 
     results = {"by_tour": not args.pooled, "base_features": BASE_FEATURES,
                "full_features": FEATURE_COLUMNS}
     if args.pooled:
-        results["pooled"] = _run(X_base, X_full, X_seq, y, match_ids, "pooled", None, models)
+        results["pooled"] = _run(X_base, X_full, X_seq, y, match_ids, "pooled", None, models,
+                                 keys, frames)
     else:
         for tour in ("men", "women"):
             m = tours == tour
             results[tour] = _run(X_base[m], X_full[m], None if X_seq is None else X_seq[m],
-                                 y[m], match_ids[m], tour, tour, models)
+                                 y[m], match_ids[m], tour, tour, models, keys[m], frames)
 
     suffix = ("_pooled" if args.pooled else "") + ("_rnn" if args.rnn else "")
     dest = RESULTS_DIR / f"exp3_base_vs_full{suffix}.json"
     dest.write_text(json.dumps(results, indent=2))
+    save_predictions(frames, dest.stem)
     print(f"\nWrote {dest}")
     print("gain_full_over_base: + means the full model is better (log-loss/Brier "
           "lower, AUC higher), paired over the same folds.")

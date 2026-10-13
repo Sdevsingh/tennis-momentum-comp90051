@@ -126,12 +126,15 @@ def nested_cv(make_model: Callable,
     all of that fold, evaluate on the held-out fold. Returns per-split metric
     values (so metrics.summarise gives you means + error bars) and the record
     of which hyperparameter value won each time (to verify the middle value is
-    usually chosen).
+    usually chosen). Also returns the out-of-fold predictions ("predictions":
+    fold number, row index into X, and probability for every held-out row) so
+    experiments can save them (src/predictions.py).
     """
     per_split_metrics = {m: [] for m in score_names}
     selected_params = []
+    pred_fold, pred_row, pred_p = [], [], []
 
-    for split in outer_splits:
+    for k, split in enumerate(outer_splits):
         tr, te = iter_fold_indices(match_ids, split)
         ordered = split.train_match_ids if temporal_inner else None
         tr = _fit_rows(tr, match_ids, ordered)
@@ -145,6 +148,10 @@ def nested_cv(make_model: Callable,
         p = model.predict_proba(X[te])
         for m in score_names:
             per_split_metrics[m].append(metrics.ALL_METRICS[m](y[te], p))
+        rows = np.flatnonzero(te)
+        pred_fold.append(np.full(len(rows), k, dtype=np.int16))
+        pred_row.append(rows)
+        pred_p.append(np.asarray(p, dtype=np.float64))
 
     # Tally selected values per hyperparameter — the brief's centring check.
     centring = {}
@@ -158,4 +165,9 @@ def nested_cv(make_model: Callable,
         "per_split": per_split_metrics,
         "selected_params": selected_params,
         "centring": centring,
+        "predictions": {
+            "fold": np.concatenate(pred_fold) if pred_fold else np.empty(0, np.int16),
+            "row": np.concatenate(pred_row) if pred_row else np.empty(0, np.int64),
+            "p": np.concatenate(pred_p) if pred_p else np.empty(0, np.float64),
+        },
     }

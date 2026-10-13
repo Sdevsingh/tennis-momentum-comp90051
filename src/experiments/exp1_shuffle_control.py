@@ -36,6 +36,7 @@ from ..models import logistic_regression, gradient_boosting
 from ..null_shuffle import shuffle_null, MODES
 from ..sequences import build_sequence_matrix
 from ..models import relational_rnn
+from ..predictions import point_keys, prediction_frame, save_predictions
 
 
 # Per-tour hyperparameter grids (used when men and women get separate models);
@@ -74,7 +75,11 @@ def tour_of(match_ids: pd.Series) -> pd.Series:
 
 
 def _nested_cv_all_models(X, X_seq, y, match_ids, label: str,
-                          tour: str | None = None) -> dict:
+                          tour: str | None = None, keys: pd.DataFrame | None = None,
+                          frames: list | None = None, dataset: str | None = None) -> dict:
+    """Nested CV for every model. If `frames` is given, each model's
+    out-of-fold predictions (rows identified by `keys`, aligned with X) are
+    appended to it as a table (src/predictions.py)."""
     ordered = matches_in_time_order(match_ids.tolist())
     splits = temporal_match_splits(ordered, n_parts=N_OUTER_REPEATS + 1)
     results = {}
@@ -82,6 +87,9 @@ def _nested_cv_all_models(X, X_seq, y, match_ids, label: str,
         grid = TOUR_GRIDS.get(name, {}).get(tour, grid)
         Xm = X_seq if name in SEQUENCE_MODELS else X   # RNN reads the raw sequence
         res = nested_cv(make, grid, Xm, y, match_ids, splits)
+        if frames is not None and keys is not None:
+            frames.append(prediction_frame(res, keys, dataset=dataset or label,
+                                           tour=tour or "pooled", model=name))
         results[name] = {
             "grid": grid,
             "summary": res["summary"],
@@ -95,22 +103,27 @@ def _nested_cv_all_models(X, X_seq, y, match_ids, label: str,
     return results
 
 
-def _run_one(points: pd.DataFrame, label: str, by_tour: bool = True) -> dict:
-    """Nested CV for every model; one set of models per tour unless pooled."""
+def _run_one(points: pd.DataFrame, label: str, by_tour: bool = True,
+             frames: list | None = None) -> dict:
+    """Nested CV for every model; one set of models per tour unless pooled.
+    Out-of-fold predictions are appended to `frames` when it is given."""
     feats = build_features(points, player_won_col="p1_won")
     X = feats[FEATURE_COLUMNS].fillna(0.0).to_numpy()
     X_seq = build_sequence_matrix(feats)              # raw sequence for the RNN
     y = feats["p1_won"].to_numpy()
     match_ids = feats["match_id"].to_numpy()
+    keys = point_keys(feats)
     if not by_tour:
-        return _nested_cv_all_models(X, X_seq, y, match_ids, label)
+        return _nested_cv_all_models(X, X_seq, y, match_ids, label,
+                                     keys=keys, frames=frames, dataset=label)
 
     tours = tour_of(feats["match_id"]).to_numpy()
     results = {}
     for tour in ("men", "women"):
         m = tours == tour
         results[tour] = _nested_cv_all_models(
-            X[m], X_seq[m], y[m], match_ids[m], f"{label}/{tour}", tour)
+            X[m], X_seq[m], y[m], match_ids[m], f"{label}/{tour}", tour,
+            keys=keys[m], frames=frames, dataset=label)
     return results
 
 
@@ -129,13 +142,14 @@ def main() -> None:
     by_tour = not args.pooled
     pts = pd.read_parquet(PROCESSED_DIR / "points.parquet")
 
+    frames: list = []
     print("REAL data:")
-    real = _run_one(pts, "real", by_tour)
+    real = _run_one(pts, "real", by_tour, frames)
 
     stats: dict = {}
     null = shuffle_null(pts, mode=args.null, stats=stats, on_exhaust=args.on_exhaust)
     print(f"SHUFFLED ({args.null}) no-momentum data:  {stats}")
-    shuffled = _run_one(null, "shuffled", by_tour)
+    shuffled = _run_one(null, "shuffled", by_tour, frames)
 
     out = {"by_tour": by_tour, "null": args.null, "on_exhaust": args.on_exhaust,
            "shuffle_stats": stats,
@@ -144,6 +158,7 @@ def main() -> None:
     dest = RESULTS_DIR / f"exp1_shuffle_control{suffix}.json"
     dest.write_text(json.dumps(out, indent=2))
     print(f"\nWrote {dest}")
+    save_predictions(frames, dest.stem)
     print("Momentum signal = real - shuffled, per metric (see report).")
 
 
