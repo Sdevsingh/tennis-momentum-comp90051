@@ -17,7 +17,8 @@ score should match exp1's real-data result.
 
 Lookbacks (points before the one being predicted):
   - fixed windows: their size (winrate_w10 -> 10, rally_len_avg10 -> 10);
-  - EWMAs: the effective memory 1/(1-decay) (ewma_d0.85 -> 6.7);
+  - EWMAs: the effective memory 1/(1-decay) (ewma_d0.85 -> 6.7), but see
+    --ewma below;
   - current-game state (game score, game/break point, court side, the
     server's rally ratio this game): 10, which covers 94% of games (mean 6.35,
     p90 10, p99 16 points);
@@ -26,6 +27,16 @@ Lookbacks (points before the one being predicted):
   - anything that looks back to the start of the set or match (set/match
     score, tiebreak flag, streaks, match aggregates, Bayesian serve estimate,
     breaks, match rally stats): the whole match (inf), so only H = "match".
+
+EWMA handling (--ewma):
+  lookback   (default) an EWMA enters at the first H >= 1/(1-decay). An EWMA
+             never fully forgets, so ~25-35% of its weight is still on points
+             older than that.
+  truncated  every EWMA (ewma_d*, surprise_ewma) is included at every H >= 1,
+             recomputed from ONLY the last H points: the same weights
+             decay^k, renormalised over those H points. Nothing older than H
+             points can reach the model. H = "match" uses the ordinary
+             (untruncated) EWMAs, so it is still exactly exp1's X.
 
 Each H is run per tour (men and women get separate models and exp1's per-tour
 grids) unless --pooled, with the same temporal outer folds and forward-chaining
@@ -42,7 +53,8 @@ import math
 import numpy as np
 import pandas as pd
 
-from ..config import PROCESSED_DIR, RESULTS_DIR, HISTORY_LENGTHS, N_OUTER_REPEATS
+from ..config import (PROCESSED_DIR, RESULTS_DIR, HISTORY_LENGTHS, N_OUTER_REPEATS,
+                      DECAY_RATES)
 from ..features import build_features, FeatureScope, feature_columns, FEATURE_COLUMNS
 from ..cross_validation import temporal_match_splits
 from ..nested_cv import nested_cv
@@ -89,24 +101,81 @@ assert not _missing, f"give these memory features a lookback in exp2: {sorted(_m
 BASE_FEATURES = (feature_columns(FeatureScope.MATCH)
                  + feature_columns(FeatureScope.POINT_STRUCTURE))
 
+# EWMA features: decay (weight of a point relative to the one after it), the
+# column they average (None = p1_won minus the pre-match expectation, as in
+# features.surprise_feature) and the value before any point is played.
+EWMA_FEATURES = {
+    **{f"ewma_d{d}": (d, "p1_won", 0.5) for d in DECAY_RATES},
+    "surprise_ewma": (1 - 0.15, None, 0.0),           # ewm(alpha=0.15)
+}
+EWMA_MODES = ("lookback", "truncated")
 
-def feature_cols_for_history(h: int | str) -> list[str]:
+
+def _truncated_ewma(prev: np.ndarray, pos: np.ndarray, d: float, h: int,
+                    fill: float) -> np.ndarray:
+    """EWMA of the previous points' values over only the last h of them.
+
+    prev[i] is the value of the point before row i in its match (row i is at
+    position pos[i], 0 = first point). Row i gets
+        sum_{k=1..min(h, pos)} d^(k-1) x_{-k} / sum_{k=1..min(h, pos)} d^(k-1),
+    the pandas ewm(alpha=1-d) weights cut off after h points. Uses
+    A_p = sum_{q<=p} d^(p-q) prev_q, so the window sum is A_p - d^h A_{p-h}
+    (rows i and i-h share a match whenever pos >= h).
+    """
+    assert pos.max() * -math.log(d) < 700, "d^-pos would overflow"
+    v = np.where(pos > 0, np.nan_to_num(prev), 0.0)
+    # A_p = d^p * cumsum_{q<=p} d^-q v_q, the cumsum restarting at each match
+    # (per match: a global cumsum minus each match's offset loses everything
+    # to cancellation, since d^-pos reaches ~1e135 in long matches)
+    match_no = np.cumsum(pos == 0)
+    cs = pd.Series(v * d ** (-pos.astype(float))).groupby(match_no).cumsum().to_numpy()
+    a = d ** pos.astype(float) * cs
+    win = a.copy()
+    long = np.flatnonzero(pos >= h)
+    win[long] -= d ** h * a[long - h]
+    weight = (1 - d ** np.minimum(pos, h)) / (1 - d)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = win / weight
+    return np.where(pos > 0, out, fill)
+
+
+def truncated_ewma_columns(feats: pd.DataFrame, h: int) -> pd.DataFrame:
+    """All EWMA_FEATURES recomputed from only the last h points."""
+    mid = feats["match_id"]
+    pos = feats.groupby("match_id", sort=False).cumcount().to_numpy()
+    resid = feats["p1_won"] - feats["expected_p1_win"]
+    out = {}
+    for col, (d, src, fill) in EWMA_FEATURES.items():
+        x = feats[src] if src else resid
+        prev = x.groupby(mid, sort=False).shift(1).to_numpy(float)
+        out[col] = _truncated_ewma(prev, pos, d, h, fill)
+    return pd.DataFrame(out, index=feats.index)
+
+
+def feature_cols_for_history(h: int | str, ewma: str = "lookback") -> list[str]:
     """MATCH + POINT_STRUCTURE features, plus the memory features whose lookback
-    is at most h points. h = "match" means the entire match: all of them."""
+    is at most h points. h = "match" means the entire match: all of them.
+    With ewma="truncated", every EWMA feature is in from h >= 1 (its values
+    must then come from truncated_ewma_columns)."""
     limit = _WHOLE_MATCH if h == "match" else h
     keep = set(BASE_FEATURES) | {c for c in feature_columns(FeatureScope.POINT_MEMORY)
                                  if MEMORY_LOOKBACK[c] <= limit}
+    if ewma == "truncated" and h != "match" and h >= 1:
+        keep |= set(EWMA_FEATURES)
     # exp1's column order, so H = "match" is exactly exp1's X
     return [c for c in FEATURE_COLUMNS if c in keep]
 
 
 def horizon_curve(feats: pd.DataFrame, y: np.ndarray, match_ids: np.ndarray,
-                  splits, make, grid, label: str) -> dict:
+                  splits, make, grid, label: str, ewma: str = "lookback") -> dict:
     """Nested-CV score at each history length for one model."""
     curve = {}
     for h in HISTORY_LENGTHS:
-        cols = feature_cols_for_history(h)
-        X = feats[cols].fillna(0.0).to_numpy()
+        cols = feature_cols_for_history(h, ewma)
+        F = feats[cols]
+        if ewma == "truncated" and h != "match" and h >= 1:
+            F = F.assign(**truncated_ewma_columns(feats, h))[cols]
+        X = F.fillna(0.0).to_numpy()
         res = nested_cv(make, grid, X, y, match_ids, splits)
         s = res["summary"]
         curve[str(h)] = {
@@ -123,7 +192,7 @@ def horizon_curve(feats: pd.DataFrame, y: np.ndarray, match_ids: np.ndarray,
     return curve
 
 
-def _run(feats: pd.DataFrame, label: str, tour: str | None) -> dict:
+def _run(feats: pd.DataFrame, label: str, tour: str | None, ewma: str = "lookback") -> dict:
     y = feats["p1_won"].to_numpy()
     match_ids = feats["match_id"].to_numpy()
     ordered = matches_in_time_order(match_ids.tolist())   # year, then AO, RG, Wimbledon, USO
@@ -133,7 +202,7 @@ def _run(feats: pd.DataFrame, label: str, tour: str | None) -> dict:
         grid = TOUR_GRIDS.get(name, {}).get(tour, grid)
         out[name] = {"grid": grid,
                      "curve": horizon_curve(feats, y, match_ids, splits, make, grid,
-                                            f"{label}/{name}")}
+                                            f"{label}/{name}", ewma)}
     return out
 
 
@@ -142,6 +211,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Exp 2: memory horizon.")
     ap.add_argument("--pooled", action="store_true",
                     help="one model for men and women together (default: separate models per tour)")
+    ap.add_argument("--ewma", choices=EWMA_MODES, default="lookback",
+                    help="lookback: an EWMA enters at H >= 1/(1-decay); truncated: every "
+                         "EWMA at every H, computed from only the last H points")
     args = ap.parse_args()
 
     pts = pd.read_parquet(PROCESSED_DIR / "points.parquet")
@@ -150,20 +222,23 @@ def main() -> None:
     feats = feats[["match_id", "p1_won"] + feature_cols_for_history("match")]
 
     results = {"by_tour": not args.pooled,
+               "ewma": args.ewma,
                "base_features": BASE_FEATURES,
                "memory_features_by_h": {
-                   str(h): [c for c in feature_cols_for_history(h) if c not in BASE_FEATURES]
+                   str(h): [c for c in feature_cols_for_history(h, args.ewma)
+                            if c not in BASE_FEATURES]
                    for h in HISTORY_LENGTHS},
                "memory_lookback": {c: (None if math.isinf(v) else v)
                                    for c, v in MEMORY_LOOKBACK.items()}}
     if args.pooled:
-        results["pooled"] = _run(feats, "pooled", None)
+        results["pooled"] = _run(feats, "pooled", None, args.ewma)
     else:
         tours = tour_of(feats["match_id"]).to_numpy()
         for tour in ("men", "women"):
-            results[tour] = _run(feats[tours == tour], tour, tour)
+            results[tour] = _run(feats[tours == tour], tour, tour, args.ewma)
 
-    dest = RESULTS_DIR / f"exp2_memory_horizon{'_pooled' if args.pooled else ''}.json"
+    suffix = ("_pooled" if args.pooled else "") + ("_ewma_truncated" if args.ewma == "truncated" else "")
+    dest = RESULTS_DIR / f"exp2_memory_horizon{suffix}.json"
     dest.write_text(json.dumps(results, indent=2))
     print(f"\nWrote {dest}")
     print("Plot metric vs H with error bars, per model and tour; mark where it "
