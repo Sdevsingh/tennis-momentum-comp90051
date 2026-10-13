@@ -54,6 +54,7 @@ def memory_horizon_figure(name: str = "exp2_memory_horizon"):
             ax.errorbar(range(len(hs)), [g[0] for g in gains], yerr=[g[1] for g in gains],
                         marker="o", capsize=3, label=model)
         ax.set_xticks(range(len(hs)), hs)
+        ax.tick_params(axis="x", labelsize=7)
         ax.axhline(0, color="grey", lw=0.8, ls="--")
         ax.set_xlabel("History length H (points)")
         ax.set_title(group)
