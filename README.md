@@ -9,7 +9,7 @@ Statistical Machine Learning (COMP90051), Semester 2 2026. Group project.
 | **Group** | 51 |
 | **Members** | Benjamin Morrison, Dev Karan Singh, Faisal Abdullah Khan |
 | **Report due** | Friday 16 October 2026, 11:59pm (Canvas) |
-| **Dataset** | Jeff Sackmann, Grand Slam point-by-point — https://github.com/JeffSackmann/tennis_slam_pointbypoint |
+| **Dataset** | Jeff Sackmann, Grand Slam point-by-point — [https://github.com/JeffSackmann/tennis_slam_pointbypoint](https://github.com/JeffSackmann/tennis_MatchChartingProject) |
 
 ---
 
