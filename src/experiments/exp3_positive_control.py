@@ -88,7 +88,7 @@ def main() -> None:
     for delta in PLANTED_DELTAS:
         sim = simulate_matches(delta=delta)
         feats = build_features(sim, player_won_col="p1_won").fillna(0.0)
-        X_tab = feats[FEATURE_COLUMNS].to_numpy()
+        X = feats[FEATURE_COLUMNS].to_numpy()
         X_seq = build_sequence_matrix(feats)          # raw sequence for the RNN
         y = feats["p1_won"].to_numpy()
         match_ids = feats["match_id"].to_numpy()
@@ -96,8 +96,8 @@ def main() -> None:
         splits = kfold_match_splits(list(dict.fromkeys(match_ids.tolist())),
                                     k=max(10, N_OUTER_REPEATS))
         for name, (make, grid) in MODELS.items():
-            X = X_seq if name in SEQUENCE_MODELS else X_tab
-            res = nested_cv(make, grid, X, y, match_ids, splits,
+            Xm = X_seq if name in SEQUENCE_MODELS else X
+            res = nested_cv(make, grid, Xm, y, match_ids, splits,
                             score_names=("log_loss", "auc"), temporal_inner=False)
             sensitivity[name][delta] = res["summary"]
             s = res["summary"]

@@ -30,11 +30,12 @@ import pandas as pd
 
 from ..config import PROCESSED_DIR, RESULTS_DIR, SEED, N_OUTER_REPEATS
 from ..features import build_features, FEATURE_COLUMNS
-from ..sequences import build_sequence_matrix
 from ..cross_validation import temporal_match_splits
 from ..nested_cv import nested_cv
-from ..models import logistic_regression, gradient_boosting, relational_rnn
+from ..models import logistic_regression, gradient_boosting
 from ..null_shuffle import shuffle_null, MODES
+from ..sequences import build_sequence_matrix
+from ..models import relational_rnn
 
 
 # Per-tour hyperparameter grids (used when men and women get separate models);
@@ -72,14 +73,15 @@ def tour_of(match_ids: pd.Series) -> pd.Series:
     return first.map({"1": "men", "M": "men", "2": "women", "W": "women"})
 
 
-def _nested_cv_all_models(X_tab, X_seq, y, match_ids, label: str, tour: str | None = None) -> dict:
+def _nested_cv_all_models(X, X_seq, y, match_ids, label: str,
+                          tour: str | None = None) -> dict:
     ordered = matches_in_time_order(match_ids.tolist())
     splits = temporal_match_splits(ordered, n_parts=N_OUTER_REPEATS + 1)
     results = {}
     for name, (make, grid) in MODELS.items():
-        X = X_seq if name in SEQUENCE_MODELS else X_tab
         grid = TOUR_GRIDS.get(name, {}).get(tour, grid)
-        res = nested_cv(make, grid, X, y, match_ids, splits)
+        Xm = X_seq if name in SEQUENCE_MODELS else X   # RNN reads the raw sequence
+        res = nested_cv(make, grid, Xm, y, match_ids, splits)
         results[name] = {
             "grid": grid,
             "summary": res["summary"],

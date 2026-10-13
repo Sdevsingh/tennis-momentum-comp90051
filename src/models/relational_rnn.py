@@ -38,8 +38,9 @@ TENNIS_RNN_DEVICE environment variable). The training data is moved to the
 device once per fit; predictions come back as numpy, so nested CV is unchanged.
 
 COMPUTE: fit() trains on the whole training fold by default, with a small
-net, few epochs and early stopping on an internal split. RNN_MAX_TRAIN (or
-max_train) can cap it to a random subset when time matters. We never report
+net, few epochs and early stopping on the latest ~10% of its training matches
+(a forward split, like the inner CV). RNN_MAX_TRAIN (or max_train) can cap it
+to a random subset when time matters. We never report
 loss-vs-epochs (2.g forbids it); epochs are only a training detail.
 """
 from __future__ import annotations
@@ -178,18 +179,24 @@ class RelationalRNN:
         y = np.asarray(y, dtype=np.float32)
         # optional subsample (max_train=None trains on everything)
         if self.max_train is not None and len(X) > self.max_train:
-            idx = rng.choice(len(X), self.max_train, replace=False)
+            idx = np.sort(rng.choice(len(X), self.max_train, replace=False))  # keep row order
             X, y = X[idx], y[idx]
         seq, static = self._split(X)
         self._n_static = static.shape[1]
         self._fit_scaler(static)
         static = self._scale(static)
 
-        # internal train/val split for early stopping
+        # Early-stopping split, forward in time like the inner CV: nested_cv
+        # passes rows oldest first, so validate on the LAST ~10% of rows. The
+        # cut moves to the next match start (a row with no history yet: an
+        # all-zero sequence, valid flag included) so no match is on both sides.
         n = len(seq)
-        perm = rng.permutation(n)
-        n_val = max(1, int(0.1 * n))
-        val, tr = perm[:n_val], perm[n_val:]
+        cut = n - max(1, int(0.1 * n))
+        starts = np.flatnonzero(~seq.reshape(n, -1).any(axis=1))
+        later = starts[starts >= cut]
+        if len(later):
+            cut = int(later[0])
+        tr, val = np.arange(cut), np.arange(cut, n)
 
         dev = self._dev = pick_device(self.device)
         if dev.type == "cuda":
