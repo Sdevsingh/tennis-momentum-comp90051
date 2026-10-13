@@ -24,8 +24,8 @@ Instead we ask a **falsifiable scientific question**:
 This is answerable only by *experiment design*, not by a feature-importance table:
 
 1. **No-momentum control (negative control).** We build a null dataset by permuting point outcomes *within each match*, conditioning on the server (and a coarse score bucket) so that base rates are preserved but temporal order is destroyed. If our models do no better on real data than on shuffled data, momentum carries no predictive signal. A null result here is a valid, reportable finding.
-2. **Memory horizon.** We give each model 0, 1, 3, 5, 10, 20 and 50 previous points of history and plot predictive gain over the no-history baseline, with error bars. Where the curve flattens is the "momentum horizon".
-3. **Planted-momentum positive control.** We simulate matches with a *known* momentum bump δ after streaks and run the whole pipeline on them, to show the smallest effect our methods could detect. This makes any null result on real data meaningful rather than an artefact of weak methods.
+2. **Memory horizon.** On top of the pre-match + serve base, we give each model 0, 1, 3, 5, 10, 20 and 50 previous points of history, and finally the whole match, and plot predictive gain over the no-history baseline, with error bars. Where the curve flattens is the "momentum horizon".
+3. **Base vs full.** Each model is trained on pre-match and serve information only (MATCH + POINT_STRUCTURE features: no knowledge of how the match is going) and on the full feature set, over the same folds. The paired difference is what in-match information adds over a stock pre-match model.
 
 **Why this is not trivial.** Serving alternates each game and stronger players win more points, so *apparent* streaks arise with no momentum at all. "Won the last 3 points" frequently just means "I am serving this game" or "I am the better player". The server/strength baseline plus the shuffle control are what stop us reporting a spurious effect — and they are the source of the critical analysis the rubric rewards.
 
@@ -55,7 +55,7 @@ tennis-momentum-comp90051/
 │   └── experiments/
 │       ├── exp1_shuffle_control.py
 │       ├── exp2_memory_horizon.py
-│       ├── exp3_positive_control.py
+│       ├── exp3_base_vs_full.py
 │       └── exp4_reset_test.py        ← optional (game/set-break reset)
 ├── results/                   ← generated tables & figures (committed)
 ├── report/
@@ -92,7 +92,7 @@ pip install -r requirements.txt
 python -m src.data_loading          # builds the cleaned point table
 python -m src.experiments.exp1_shuffle_control
 python -m src.experiments.exp2_memory_horizon
-python -m src.experiments.exp3_positive_control
+python -m src.experiments.exp3_base_vs_full
 ```
 
 ## 6. Status

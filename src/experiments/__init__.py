@@ -5,7 +5,7 @@ Each experiment is what makes the project answer the *research question*
 
   exp1_shuffle_control  — negative control: does order beat a shuffled (game-aware) null?
   exp2_memory_horizon   — how far back does predictive memory reach?
-  exp3_positive_control — planted-momentum sanity floor: smallest detectable effect
+  exp3_base_vs_full     — pre-match + serve only vs the full model: what in-match info adds
   exp4_reset_test       — (optional) does momentum survive game/set breaks?
 
 Run them as modules, e.g.  python -m src.experiments.exp1_shuffle_control

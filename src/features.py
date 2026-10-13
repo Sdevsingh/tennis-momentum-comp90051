@@ -285,7 +285,7 @@ def slam_rally_baseline(points: pd.DataFrame) -> pd.Series:
     known = points[points["rally"].notna()] if "rally" in points.columns else points.iloc[:0]
     all_mids = pd.Series(points["match_id"].unique())
     # Only real Slam ids ("2019-wimbledon-1301") have a slam/year/round;
-    # anything else (e.g. exp3's simulated "sim0000") gets the neutral value.
+    # anything else (e.g. simulated "sim0000" ids) gets the neutral value.
     slam_id = all_mids.str.match(r"^\d{4}-[a-z]+-[A-Za-z]*\d{3,}$")
     neutral = pd.Series(RALLY_NEUTRAL_LEN, index=all_mids[~slam_id].values, dtype=float)
     mids = all_mids[slam_id].reset_index(drop=True)

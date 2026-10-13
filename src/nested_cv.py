@@ -119,8 +119,8 @@ def nested_cv(make_model: Callable,
     temporal_inner (default): the outer splits list each training fold's
     matches in time order (temporal_match_splits / expanding_window_splits
     do), and the inner tuning folds are forward-chaining in that order. Pass
-    False when the outer splits have no time order (random k-fold, e.g. the
-    simulated data in exp3); the inner folds are then random k-fold.
+    False when the outer splits have no time order (random k-fold, e.g. simulated
+    data); the inner folds are then random k-fold.
 
     For each outer split: tune on the training fold, refit the best model on
     all of that fold, evaluate on the held-out fold. Returns per-split metric

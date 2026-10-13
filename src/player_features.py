@@ -538,7 +538,7 @@ def add_player_features(points: pd.DataFrame, path: Path = MATCH_FILE) -> pd.Dat
                                         the baseline the surprise feature
                                         measures momentum against.
 
-    Matches with no link (or simulated matches in exp3) get neutral values
+    Matches with no link (or simulated matches) get neutral values
     (medians, equal players) and player_features_known = 0. Not NaN: the
     experiments fillna(0), and e.g. an Elo of 0 would be wildly informative.
     """
