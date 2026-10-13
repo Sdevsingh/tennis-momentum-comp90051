@@ -36,6 +36,9 @@ DEVICE: runs on a GPU when this PyTorch build can see one -- NVIDIA (cuda),
 Intel Arc (xpu) or Apple (mps) -- else the CPU (config.RNN_DEVICE, or the
 TENNIS_RNN_DEVICE environment variable). The training data is moved to the
 device once per fit; predictions come back as numpy, so nested CV is unchanged.
+GPU kernels run in deterministic mode (config.RNN_DETERMINISTIC), so a fit is
+bit-for-bit repeatable; without it identical fits on the Arc differed by up
+to 0.06 in a prediction. A run that falls back to the CPU says so.
 
 COMPUTE: fit() trains on the whole training fold by default, with a small
 net, few epochs and early stopping on the latest ~10% of its training matches
@@ -50,7 +53,8 @@ import os
 import numpy as np
 
 from ..config import (RNN_HISTORY, RNN_STEP_FEATURES, RNN_MAX_TRAIN,
-                      RNN_EPOCHS, RNN_BATCH, RNN_LR, RNN_DEVICE, SEED)
+                      RNN_EPOCHS, RNN_BATCH, RNN_LR, RNN_DEVICE, RNN_DETERMINISTIC,
+                      SEED)
 
 try:
     import torch
@@ -58,6 +62,15 @@ try:
     _TORCH = True
 except Exception:                                    # torch optional at import
     _TORCH = False
+
+
+_WARNED: set[str] = set()
+
+
+def _warn_once(msg: str) -> None:
+    if msg not in _WARNED:
+        _WARNED.add(msg)
+        print(f"  [relational_rnn] {msg}", flush=True)
 
 
 def pick_device(preference: str | None = None) -> "torch.device":
@@ -75,7 +88,10 @@ def pick_device(preference: str | None = None) -> "torch.device":
         "cpu": True,
     }
     if pref == "auto":
-        return torch.device(next(d for d in ("cuda", "xpu", "mps", "cpu") if available[d]))
+        dev = next(d for d in ("cuda", "xpu", "mps", "cpu") if available[d])
+        if dev == "cpu":
+            _warn_once("no GPU visible to this PyTorch build; the RNN trains on the CPU")
+        return torch.device(dev)
     if not available.get(pref, False):
         print(f"  [relational_rnn] device '{pref}' not available in this PyTorch build; using cpu")
         return torch.device("cpu")
@@ -173,6 +189,8 @@ class RelationalRNN:
         return np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
     def fit(self, X, y):
+        if RNN_DETERMINISTIC:
+            torch.use_deterministic_algorithms(True)
         torch.manual_seed(self.seed)
         rng = np.random.default_rng(self.seed)
         X = np.asarray(X, dtype=np.float32)

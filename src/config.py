@@ -96,9 +96,16 @@ RNN_RALLY_SCALE = 10
 # model ~0.004 log-loss against LR/LightGBM in exp1.
 RNN_MAX_TRAIN = None
 RNN_EPOCHS = 8
-RNN_BATCH = 512
-RNN_LR = 1e-3
+# Batch 2048 with lr 2e-3: on the Intel Arc GPU, half the fit time of batch
+# 512 / lr 1e-3 for test log-loss 0.6639 vs 0.6630 (one benchmark fit).
+RNN_BATCH = 2048
+RNN_LR = 2e-3
 # Device for the RNN: "auto" picks cuda (NVIDIA) -> xpu (Intel Arc) -> mps
 # (Apple) -> cpu, whichever this PyTorch build can use. Or force one, e.g.
 # "cpu". The environment variable TENNIS_RNN_DEVICE overrides this.
 RNN_DEVICE = "auto"
+# Deterministic GPU kernels (torch.use_deterministic_algorithms). Without it
+# two identical fits on the Arc differed by up to 0.06 in a prediction, which
+# is far larger than the momentum effects being measured; with it they are
+# bit-identical, within and across runs, at about the same speed.
+RNN_DETERMINISTIC = True

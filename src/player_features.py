@@ -234,6 +234,9 @@ def load_tour_matches(archive: Path, tour: str) -> pd.DataFrame:
     files = sorted(f for pat in TOURS[tour] for f in (archive / tour).glob(pat))
     df = pd.concat([pd.read_csv(f, usecols=USECOLS, low_memory=False)
                     for f in files], ignore_index=True)
+    # The WTA source repeats ~12k rows byte for byte (1987-95, and WTA 125
+    # events since 2014); counted twice they move Elo/TrueSkill/career counts.
+    df = df.drop_duplicates(subset=USECOLS, ignore_index=True)
     df["tour"] = tour
     df = df[df["winner_id"].notna() & df["loser_id"].notna()
             & df["tourney_date"].notna()].copy()
@@ -397,6 +400,18 @@ def _same(a: dict, b: dict, level: str) -> bool:
     return a[level] is not None and a[level] == b[level]
 
 
+# Slam match numbers encode the round: 1xyy / 2xyy (and MS1yy / WS1yy at the
+# 2021 AO), round digit x = 1 (R128) ... 7 (F).
+_SLAM_ROUND = {1: "R128", 2: "R64", 3: "R32", 4: "R16", 5: "QF", 6: "SF", 7: "F"}
+
+
+def _slam_round_order(match_id: str) -> int | None:
+    num = str(match_id).rsplit("-", 1)[-1]
+    digit = num[2] if num[:2] in ("MS", "WS") else (num[1] if len(num) == 4 else None)
+    rnd = _SLAM_ROUND.get(int(digit)) if digit and digit.isdigit() else None
+    return ROUND_ORDER[rnd] if rnd else None
+
+
 def link_slam_matches(slam: pd.DataFrame, rated: pd.DataFrame) -> pd.DataFrame:
     """Attach both players' pre-match features to each slam match_id."""
     rated = rated[(rated["tourney_level"] == "G") & (rated["round_order"] >= 10)
@@ -429,6 +444,26 @@ def link_slam_matches(slam: pd.DataFrame, rated: pd.DataFrame) -> pd.DataFrame:
                     break
                 if len(cand) > 1:
                     break                          # ambiguous: don't guess
+            if hit is None:
+                # One player matched exactly + the round: the other was renamed
+                # in the tour files (e.g. Riske, Gavrilova -> Saville, Ramos
+                # Vinolas -> Ramos) or has no name in the slam file. A player
+                # plays one match per round, so this is unique when it hits.
+                rnd = _slam_round_order(m.match_id)
+                for level in ("full", "init_last"):
+                    cand = []
+                    for r in draw.itertuples(index=False):
+                        if rnd is None or r.round_order != rnd:
+                            continue
+                        if _same(k1, r.wk, level) or _same(k2, r.lk, level):
+                            cand.append((r, True))
+                        elif _same(k1, r.lk, level) or _same(k2, r.wk, level):
+                            cand.append((r, False))
+                    if len(cand) == 1:
+                        hit = cand[0] + (f"one_{level}_round",)
+                        break
+                    if len(cand) > 1:
+                        break
         if hit is not None:
             r, p1_won, level = hit
             a, b = ("w", "l") if p1_won else ("l", "w")

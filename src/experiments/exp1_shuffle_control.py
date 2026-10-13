@@ -20,6 +20,19 @@ instead re-forms each match from per-server pools of its real points (games
 and sets end wherever the scoring rules say), which removes the within-game
 "drawing without replacement" structure the other modes keep; see
 src/null_shuffle.py.
+
+--seeds runs the null with several shuffle seeds (default 51 52 53): one
+shuffle is a single random draw, and on a subset the real-vs-null gap moved by
+as much as its fold standard error between seeds. The shuffled per-fold
+metrics are averaged over seeds before pairing.
+
+The headline is PAIRED: real and every null use identical match splits, so
+"paired" in the JSON holds, per tour and model, the per-fold gain of real over
+the seed-averaged null (+ = real predicts better = momentum signal), its
+standard error over folds, and the per-seed gains with their spread.
+
+--models picks which models run (default all three). The RNN's sequence input
+(~2.7 GB for all points) is built only when "rmc" is run, one tour at a time.
 """
 from __future__ import annotations
 
@@ -34,7 +47,8 @@ from ..cross_validation import temporal_match_splits
 from ..nested_cv import nested_cv
 from ..models import logistic_regression, gradient_boosting
 from ..null_shuffle import shuffle_null, MODES
-from ..sequences import build_sequence_matrix
+from ..sequences import build_sequence_matrix, STATIC_FEATURES
+from .. import metrics
 from ..models import relational_rnn
 from ..predictions import point_keys, prediction_frame, save_predictions
 
@@ -76,19 +90,23 @@ def tour_of(match_ids: pd.Series) -> pd.Series:
 
 def _nested_cv_all_models(X, X_seq, y, match_ids, label: str,
                           tour: str | None = None, keys: pd.DataFrame | None = None,
-                          frames: list | None = None, dataset: str | None = None) -> dict:
-    """Nested CV for every model. If `frames` is given, each model's
-    out-of-fold predictions (rows identified by `keys`, aligned with X) are
-    appended to it as a table (src/predictions.py)."""
+                          frames: list | None = None, dataset: str | None = None,
+                          models: list[str] | None = None,
+                          extra_labels: dict | None = None) -> dict:
+    """Nested CV for every model in `models` (default all). If `frames` is
+    given, each model's out-of-fold predictions (rows identified by `keys`,
+    aligned with X) are appended to it as a table (src/predictions.py)."""
     ordered = matches_in_time_order(match_ids.tolist())
     splits = temporal_match_splits(ordered, n_parts=N_OUTER_REPEATS + 1)
     results = {}
-    for name, (make, grid) in MODELS.items():
+    for name in (models or list(MODELS)):
+        make, grid = MODELS[name]
         grid = TOUR_GRIDS.get(name, {}).get(tour, grid)
         Xm = X_seq if name in SEQUENCE_MODELS else X   # RNN reads the raw sequence
         res = nested_cv(make, grid, Xm, y, match_ids, splits)
         if frames is not None and keys is not None:
             frames.append(prediction_frame(res, keys, dataset=dataset or label,
+                                           **(extra_labels or {}),
                                            tour=tour or "pooled", model=name))
         results[name] = {
             "grid": grid,
@@ -104,27 +122,57 @@ def _nested_cv_all_models(X, X_seq, y, match_ids, label: str,
 
 
 def _run_one(points: pd.DataFrame, label: str, by_tour: bool = True,
-             frames: list | None = None) -> dict:
+             frames: list | None = None, models: list[str] | None = None,
+             extra_labels: dict | None = None) -> dict:
     """Nested CV for every model; one set of models per tour unless pooled.
     Out-of-fold predictions are appended to `frames` when it is given."""
+    models = models or list(MODELS)
     feats = build_features(points, player_won_col="p1_won")
     X = feats[FEATURE_COLUMNS].fillna(0.0).to_numpy()
-    X_seq = build_sequence_matrix(feats)              # raw sequence for the RNN
     y = feats["p1_won"].to_numpy()
     match_ids = feats["match_id"].to_numpy()
     keys = point_keys(feats)
-    if not by_tour:
-        return _nested_cv_all_models(X, X_seq, y, match_ids, label,
-                                     keys=keys, frames=frames, dataset=label)
-
-    tours = tour_of(feats["match_id"]).to_numpy()
+    if by_tour:
+        tours = tour_of(feats["match_id"]).to_numpy()
+        groups = [(t, tours == t) for t in ("men", "women")]
+    else:
+        groups = [("pooled", np.ones(len(feats), dtype=bool))]
+    # The RNN's sequence matrix is built one group at a time from just the
+    # columns it reads, so the full ~2.7 GB matrix never exists.
+    need_seq = any(m in SEQUENCE_MODELS for m in models)
+    seq_src = (feats[["match_id", "point_server", "point_winner", "rally"]
+                     + list(STATIC_FEATURES)].copy() if need_seq else None)
+    del feats
     results = {}
-    for tour in ("men", "women"):
-        m = tours == tour
-        results[tour] = _nested_cv_all_models(
-            X[m], X_seq[m], y[m], match_ids[m], f"{label}/{tour}", tour,
-            keys=keys[m], frames=frames, dataset=label)
+    for group, m in groups:
+        X_seq = build_sequence_matrix(seq_src[m]) if need_seq else None
+        results[group] = _nested_cv_all_models(
+            X[m], X_seq, y[m], match_ids[m], f"{label}/{group}",
+            None if group == "pooled" else group, keys=keys[m], frames=frames,
+            dataset=label, models=models, extra_labels=extra_labels)
+        del X_seq
     return results
+
+
+def paired_real_vs_null(real: dict, shuffled: dict) -> dict:
+    """Per group and model: gain of real over the seed-averaged null, paired by
+    fold (+ = real better), plus each seed's gain and the spread over seeds."""
+    seeds = list(shuffled)
+    out = {}
+    for group, models in real.items():
+        out[group] = {}
+        for name, r in models.items():
+            per_seed = {sd: metrics.paired_gain(shuffled[sd][group][name]["per_split"],
+                                                r["per_split"]) for sd in seeds}
+            avg = {m: np.mean([shuffled[sd][group][name]["per_split"][m] for sd in seeds], axis=0)
+                   for m in r["per_split"]}
+            gain = metrics.paired_gain(avg, r["per_split"])
+            for m, g in gain.items():
+                means = [per_seed[sd][m]["mean"] for sd in seeds]
+                g["seed_sd"] = float(np.std(means, ddof=1)) if len(seeds) > 1 else float("nan")
+                g["per_seed"] = {sd: per_seed[sd][m]["mean"] for sd in seeds}
+            out[group][name] = gain
+    return out
 
 
 def main() -> None:
@@ -138,28 +186,48 @@ def main() -> None:
     ap.add_argument("--on-exhaust", choices=("recycle", "stop"), default="recycle",
                     help="replay only: when a server's pool runs out, reuse a fresh "
                          "shuffled copy (recycle) or end the match there (stop)")
+    ap.add_argument("--seeds", type=int, nargs="+", default=[SEED, SEED + 1, SEED + 2],
+                    help="shuffle seeds for the null (default 51 52 53); the shuffled "
+                         "per-fold metrics are averaged over them")
+    ap.add_argument("--models", nargs="+", choices=list(MODELS), default=list(MODELS),
+                    help="models to run (default all; the RNN takes hours on a GPU)")
     args = ap.parse_args()
     by_tour = not args.pooled
     pts = pd.read_parquet(PROCESSED_DIR / "points.parquet")
-
     frames: list = []
-    print("REAL data:")
-    real = _run_one(pts, "real", by_tour, frames)
 
-    stats: dict = {}
-    null = shuffle_null(pts, mode=args.null, stats=stats, on_exhaust=args.on_exhaust)
-    print(f"SHUFFLED ({args.null}) no-momentum data:  {stats}")
-    shuffled = _run_one(null, "shuffled", by_tour, frames)
+    print("REAL data:")
+    real = _run_one(pts, "real", by_tour, frames, args.models, {"null_seed": "none"})
+
+    shuffled, stats = {}, {}
+    for seed in args.seeds:
+        st: dict = {}
+        null = shuffle_null(pts, mode=args.null, seed=seed, stats=st, on_exhaust=args.on_exhaust)
+        print(f"SHUFFLED ({args.null}, seed {seed}) no-momentum data:  {st}")
+        shuffled[str(seed)] = _run_one(null, "shuffled", by_tour, frames, args.models,
+                                       {"null_seed": str(seed)})
+        stats[str(seed)] = st
+        del null
+    del pts
+
+    paired = paired_real_vs_null(real, shuffled)
+    for group, models in paired.items():
+        for name, g in models.items():
+            ll = g["log_loss"]
+            print(f"  [paired {group}/{name}] real better by {ll['mean']:+.5f} ± {ll['se']:.5f} "
+                  f"log-loss (t {ll['t']:+.1f}, {ll['better']}/{ll['n_folds']} folds; "
+                  f"seed sd {ll['seed_sd']:.5f})", flush=True)
 
     out = {"by_tour": by_tour, "null": args.null, "on_exhaust": args.on_exhaust,
-           "shuffle_stats": stats,
-           "real": real, "shuffled": shuffled}
-    suffix = ("" if by_tour else "_pooled") + ("" if args.null == "both" else f"_{args.null}")
+           "seeds": args.seeds, "models": args.models, "shuffle_stats": stats,
+           "paired": paired, "real": real, "shuffled": shuffled}
+    suffix = (("" if by_tour else "_pooled") + ("" if args.null == "both" else f"_{args.null}")
+              + ("" if args.models == list(MODELS) else "_" + "-".join(args.models)))
     dest = RESULTS_DIR / f"exp1_shuffle_control{suffix}.json"
     dest.write_text(json.dumps(out, indent=2))
     print(f"\nWrote {dest}")
     save_predictions(frames, dest.stem)
-    print("Momentum signal = real - shuffled, per metric (see report).")
+    print("Momentum signal = paired gain of real over the null ('paired' in the JSON).")
 
 
 if __name__ == "__main__":

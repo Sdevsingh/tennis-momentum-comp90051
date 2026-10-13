@@ -90,6 +90,27 @@ def summarise(values: list[float]) -> dict[str, float]:
     return {"mean": mean, "se": se, "n": n}
 
 
+LOWER_IS_BETTER = {"log_loss", "brier"}
+
+
+def paired_gain(base: dict, other: dict) -> dict:
+    """Per-fold gain of `other` over `base` on the same folds, signed so that
+    + means `other` is better (lower log-loss/Brier, higher AUC/accuracy).
+
+    base, other: {metric: [value per fold]}. Pairing removes the fold-to-fold
+    difficulty that dominates unpaired error bars.
+    """
+    out = {}
+    for m in base:
+        b, o = np.asarray(base[m], float), np.asarray(other[m], float)
+        g = (b - o) if m in LOWER_IS_BETTER else (o - b)
+        se = g.std(ddof=1) / np.sqrt(len(g)) if len(g) > 1 else float("nan")
+        out[m] = {"mean": float(g.mean()), "se": float(se),
+                  "t": float(g.mean() / se) if se > 0 else float("nan"),
+                  "better": int((g > 0).sum()), "n_folds": int(len(g))}
+    return out
+
+
 ALL_METRICS = {
     "log_loss": log_loss,
     "brier": brier_score,

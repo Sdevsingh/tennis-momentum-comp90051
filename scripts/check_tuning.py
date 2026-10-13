@@ -20,16 +20,20 @@ import sys
 from pathlib import Path
 
 
-def _find_centrings(node, trail=""):
-    """Yield (path, centring_dict) for every 'centring' found in the JSON."""
+def _find_centrings(node, trail="", grid=None):
+    """Yield (path, centring_dict, grid) for every 'centring' in the JSON.
+
+    The grid is the "grid" stored next to the centring, or the nearest one
+    above it (exp3 stores one grid per model for its base and full runs)."""
     if isinstance(node, dict):
+        grid = node.get("grid", grid) if isinstance(node.get("grid"), dict) else grid
         if "centring" in node and isinstance(node["centring"], dict):
-            yield trail, node["centring"]
+            yield trail, node["centring"], grid
         for k, v in node.items():
-            yield from _find_centrings(v, f"{trail}/{k}" if trail else str(k))
+            yield from _find_centrings(v, f"{trail}/{k}" if trail else str(k), grid)
     elif isinstance(node, list):
         for i, v in enumerate(node):
-            yield from _find_centrings(v, f"{trail}[{i}]")
+            yield from _find_centrings(v, f"{trail}[{i}]", grid)
 
 
 def _num(s):
@@ -48,14 +52,22 @@ def check(path: Path) -> int:
         return 1
 
     problems = 0
-    for trail, centring in found:
+    for trail, centring, grid in found:
         for hp, counts in centring.items():
-            # counts: {value(str): times chosen}
-            values = sorted(counts, key=lambda v: _num(v))
-            mid = values[len(values) // 2]
-            winner = max(counts, key=lambda v: counts[v])
-            tally = ", ".join(f"{v}:{counts[v]}" for v in values)
-            flag = ""
+            # counts: {value(str): times chosen}. The middle must come from the
+            # GRID: the chosen values alone can't tell an edge from the centre
+            # (a grid [a, b, c] where a always wins would look centred).
+            if grid and hp in grid:
+                values = sorted(grid[hp], key=_num)
+                note = ""
+            else:
+                values = sorted(counts, key=_num)
+                note = "  (no grid stored: middle of the CHOSEN values, unreliable)"
+            mid = _num(values[len(values) // 2])
+            by_num = {_num(v): c for v, c in counts.items()}
+            winner = max(by_num, key=by_num.get)
+            tally = ", ".join(f"{v}:{by_num.get(_num(v), 0)}" for v in values)
+            flag = note
             if winner != mid:
                 flag = "  <-- EXTREME won; consider shifting the grid"
                 problems += 1
