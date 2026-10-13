@@ -4,6 +4,8 @@ data/processed/
 *.parquet
 *.csv
 !data/README.md
+# ...but keep the plotted values behind the report figures
+!report/figures/*.csv
 
 # Python
 __pycache__/
