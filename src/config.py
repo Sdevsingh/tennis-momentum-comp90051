@@ -22,7 +22,8 @@ SEED = 51  # group number, why not
 
 # --- Experiment constants ---
 # Memory horizon: how many previous points of history each model is given.
-HISTORY_LENGTHS = [0, 1, 3, 5, 10, 20, 50]
+# "match" (last) is the entire match so far (exp2_memory_horizon.py).
+HISTORY_LENGTHS = [0, 1, 3, 5, 10, 20, 50, "match"]
 
 # Exponential decay rates for weighted win-rate features.
 DECAY_RATES = [0.5, 0.7, 0.85, 0.95]
