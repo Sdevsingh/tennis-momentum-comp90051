@@ -25,6 +25,7 @@ venv/
 
 # Results are committed (small JSON/figures), but not large dumps:
 results/*.pkl
+results/checkpoints/
 
 # LaTeX build artifacts
 report/*.aux

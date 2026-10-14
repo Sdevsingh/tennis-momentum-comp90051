@@ -31,12 +31,19 @@ The headline is PAIRED: real and every null use identical match splits, so
 the seed-averaged null (+ = real predicts better = momentum signal), its
 standard error over folds, and the per-seed gains with their spread.
 
+Checkpoints: every finished (dataset, tour) block is written to
+results/checkpoints/<output name>/<dataset>/<tour>.json (+ .parquet with its
+predictions), and a rerun with the same arguments loads finished blocks
+instead of recomputing them, so a crash or reboot costs at most one block.
+--null-first runs the shuffled data before the real data (same results).
+
 --models picks which models run (default all three). The RNN's sequence input
 (~2.7 GB for all points) is built only when "rmc" is run, one tour at a time.
 """
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -123,10 +130,29 @@ def _nested_cv_all_models(X, X_seq, y, match_ids, label: str,
 
 def _run_one(points: pd.DataFrame, label: str, by_tour: bool = True,
              frames: list | None = None, models: list[str] | None = None,
-             extra_labels: dict | None = None) -> dict:
+             extra_labels: dict | None = None, ckpt: Path | None = None) -> dict:
     """Nested CV for every model; one set of models per tour unless pooled.
-    Out-of-fold predictions are appended to `frames` when it is given."""
+    Out-of-fold predictions are appended to `frames` when it is given.
+
+    With `ckpt` (a directory), each finished tour is saved there as
+    <tour>.json (+ <tour>.parquet predictions) and tours already saved are
+    loaded instead of recomputed; `points` may then be a callable that builds
+    the data only if some tour still has to run."""
     models = models or list(MODELS)
+    names = ["men", "women"] if by_tour else ["pooled"]
+    results = {}
+    if ckpt is not None:
+        for group in names:
+            f = ckpt / f"{group}.json"
+            if f.exists():
+                results[group] = json.loads(f.read_text())
+                if frames is not None and f.with_suffix(".parquet").exists():
+                    frames.append(pd.read_parquet(f.with_suffix(".parquet")))
+                print(f"  [{label}/{group}] loaded from checkpoint {f}", flush=True)
+        if len(results) == len(names):
+            return results
+    if callable(points):
+        points = points()
     feats = build_features(points, player_won_col="p1_won")
     X = feats[FEATURE_COLUMNS].fillna(0.0).to_numpy()
     y = feats["p1_won"].to_numpy()
@@ -143,15 +169,25 @@ def _run_one(points: pd.DataFrame, label: str, by_tour: bool = True,
     seq_src = (feats[["match_id", "point_server", "point_winner", "rally"]
                      + list(STATIC_FEATURES)].copy() if need_seq else None)
     del feats
-    results = {}
     for group, m in groups:
+        if group in results:
+            continue                                   # loaded from a checkpoint
         X_seq = build_sequence_matrix(seq_src[m]) if need_seq else None
+        group_frames: list = []
         results[group] = _nested_cv_all_models(
             X[m], X_seq, y[m], match_ids[m], f"{label}/{group}",
-            None if group == "pooled" else group, keys=keys[m], frames=frames,
+            None if group == "pooled" else group, keys=keys[m], frames=group_frames,
             dataset=label, models=models, extra_labels=extra_labels)
         del X_seq
-    return results
+        if frames is not None:
+            frames.extend(group_frames)
+        if ckpt is not None:
+            ckpt.mkdir(parents=True, exist_ok=True)
+            if group_frames:
+                pd.concat(group_frames, ignore_index=True).to_parquet(ckpt / f"{group}.parquet")
+            (ckpt / f"{group}.json").write_text(json.dumps(results[group], indent=2))
+            print(f"  [{label}/{group}] checkpoint saved to {ckpt / (group + '.json')}", flush=True)
+    return {g: results[g] for g in names}
 
 
 def paired_real_vs_null(real: dict, shuffled: dict) -> dict:
@@ -191,23 +227,41 @@ def main() -> None:
                          "per-fold metrics are averaged over them")
     ap.add_argument("--models", nargs="+", choices=list(MODELS), default=list(MODELS),
                     help="models to run (default all; the RNN takes hours on a GPU)")
+    ap.add_argument("--null-first", action="store_true",
+                    help="run the shuffled data before the real data (same results)")
     args = ap.parse_args()
     by_tour = not args.pooled
+    suffix = (("" if by_tour else "_pooled") + ("" if args.null == "both" else f"_{args.null}")
+              + ("" if args.models == list(MODELS) else "_" + "-".join(args.models)))
+    dest = RESULTS_DIR / f"exp1_shuffle_control{suffix}.json"
+    ckpt_root = RESULTS_DIR / "checkpoints" / dest.stem
     pts = pd.read_parquet(PROCESSED_DIR / "points.parquet")
     frames: list = []
+    real, shuffled, stats = None, {}, {}
 
-    print("REAL data:")
-    real = _run_one(pts, "real", by_tour, frames, args.models, {"null_seed": "none"})
+    def run_real():
+        print("REAL data:")
+        return _run_one(pts, "real", by_tour, frames, args.models, {"null_seed": "none"},
+                        ckpt=ckpt_root / "real")
 
-    shuffled, stats = {}, {}
+    if not args.null_first:
+        real = run_real()
     for seed in args.seeds:
         st: dict = {}
-        null = shuffle_null(pts, mode=args.null, seed=seed, stats=st, on_exhaust=args.on_exhaust)
-        print(f"SHUFFLED ({args.null}, seed {seed}) no-momentum data:  {st}")
-        shuffled[str(seed)] = _run_one(null, "shuffled", by_tour, frames, args.models,
-                                       {"null_seed": str(seed)})
+
+        def make_null(seed=seed, st=st):
+            null = shuffle_null(pts, mode=args.null, seed=seed, stats=st,
+                                on_exhaust=args.on_exhaust)
+            print(f"SHUFFLED ({args.null}, seed {seed}) no-momentum data:  {st}")
+            return null
+
+        print(f"SHUFFLED ({args.null}, seed {seed}):")
+        shuffled[str(seed)] = _run_one(make_null, "shuffled", by_tour, frames, args.models,
+                                       {"null_seed": str(seed)},
+                                       ckpt=ckpt_root / f"null_{args.null}_seed{seed}")
         stats[str(seed)] = st
-        del null
+    if args.null_first:
+        real = run_real()
     del pts
 
     paired = paired_real_vs_null(real, shuffled)
@@ -221,9 +275,6 @@ def main() -> None:
     out = {"by_tour": by_tour, "null": args.null, "on_exhaust": args.on_exhaust,
            "seeds": args.seeds, "models": args.models, "shuffle_stats": stats,
            "paired": paired, "real": real, "shuffled": shuffled}
-    suffix = (("" if by_tour else "_pooled") + ("" if args.null == "both" else f"_{args.null}")
-              + ("" if args.models == list(MODELS) else "_" + "-".join(args.models)))
-    dest = RESULTS_DIR / f"exp1_shuffle_control{suffix}.json"
     dest.write_text(json.dumps(out, indent=2))
     print(f"\nWrote {dest}")
     save_predictions(frames, dest.stem)
