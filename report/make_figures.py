@@ -157,7 +157,66 @@ def shuffle_control_figure(name: str = "exp1_shuffle_control"):
     _save(fig, name.replace("exp1_", ""), rows)
 
 
+def calibration_figure(name: str = "exp1_shuffle_control_logreg-gboost",
+                       n_bins: int = 20, min_count: int = 1000):
+    """Reliability curves of the full models on real data, from the saved
+    out-of-fold predictions (results/predictions/<name>.parquet, dataset =
+    real): mean predicted vs observed P(player 1 wins the point) per bin, one
+    panel per tour, with the share of points per bin underneath. Bins come from
+    src/metrics.calibration_bins (from scratch); bins with < min_count points
+    are dropped. ECE = point-weighted mean |observed - predicted|."""
+    import sys
+    sys.path.insert(0, str(ROOT))
+    import pyarrow.parquet as pq
+    from src.metrics import calibration_bins
+
+    path = RESULTS / "predictions" / f"{name}.parquet"
+    if not path.exists():
+        print(f"  [skip] {path.name} not found — run exp1 first.")
+        return
+    df = pq.read_table(path, columns=["dataset", "tour", "model", "y", "p"],
+                       filters=[("dataset", "=", "real")]).to_pandas()
+    groups = [g for g in _GROUPS if g in set(df["tour"].astype(str))]
+    models = list(dict.fromkeys(df["model"].astype(str)))
+
+    fig, axes = plt.subplots(2, len(groups), figsize=(3.4 * len(groups), 3.6), squeeze=False,
+                             gridspec_kw={"height_ratios": [3, 1]}, sharex="col")
+    rows = []
+    for j, group in enumerate(groups):
+        ax, hx = axes[0][j], axes[1][j]
+        lo, hi = 1.0, 0.0
+        for i, model in enumerate(models):
+            d = df[(df["tour"] == group) & (df["model"] == model)]
+            y, p = d["y"].to_numpy(float), d["p"].to_numpy(float)
+            pred, obs, cnt = calibration_bins(y, p, n_bins=n_bins)
+            keep = cnt >= min_count
+            ece = float(np.nansum(cnt * np.abs(obs - pred)) / cnt.sum())
+            ax.plot(pred[keep], obs[keep], marker="o", ms=4, lw=1.5, color=f"C{i}",
+                    label=f"{model} (ECE {ece:.4f})")
+            w = 1.0 / n_bins
+            hx.bar(pred[keep] + (i - 0.5) * w * 0.4, cnt[keep] / cnt.sum(), width=w * 0.4,
+                   color=f"C{i}", alpha=0.8)
+            lo, hi = min(lo, np.nanmin(pred[keep])), max(hi, np.nanmax(pred[keep]))
+            rows += [{"tour": group, "model": model, "bin": b, "mean_pred": pred[b],
+                      "obs_freq": obs[b], "count": int(cnt[b]), "ece": ece}
+                     for b in range(n_bins) if cnt[b] > 0]
+        pad = 0.03
+        ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], color="grey", lw=0.8, ls="--",
+                label="perfect")
+        ax.set_xlim(lo - pad, hi + pad); ax.set_ylim(lo - pad, hi + pad)
+        ax.set_title(group)
+        ax.legend(fontsize=6.5, loc="upper left")
+        hx.set_xlabel("Predicted P(player 1 wins point)")
+        hx.tick_params(labelsize=7)
+    axes[0][0].set_ylabel("Observed frequency")
+    axes[1][0].set_ylabel("Share", fontsize=8)
+    fig.suptitle("Calibration of the full models (real data, out-of-fold)", fontsize=9)
+    fig.tight_layout()
+    _save(fig, "calibration", rows)
+
+
 if __name__ == "__main__":
+    calibration_figure()
     # every exp1 results file (the default run and per-model runs such as
     # exp1_shuffle_control_logreg-gboost / _rmc)
     for f in sorted(RESULTS.glob("exp1_shuffle_control*.json")):
