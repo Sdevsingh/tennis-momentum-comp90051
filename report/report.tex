@@ -199,10 +199,10 @@ vs.\ shuffled, full vs.\ base) are \emph{paired} per fold. We do not report loss
 against training epochs.
 
 \section{Results and discussion}
-\emph{All numeric cells below are placeholders (\ph{in red}) to be replaced by the
-outputs in \texttt{results/*.json} after running the three experiment scripts;
-the figures are produced by \texttt{report/make\_figures.py}. The surrounding
-analysis is written to hold for either outcome.}
+Log-loss differences below are paired per fold and given in units of
+$10^{-4}$ (mean $\pm$ s.e.\ over the 10 folds); positive means the first-named
+condition predicts better. The Relational RNN run is still in progress
+(\ph{red} cells).
 
 \subsection{R1 --- Shuffle control}
 Table~\ref{tab:shuffle} compares each model on real data against the order-destroyed
@@ -210,64 +210,82 @@ null. The null is drawn with three shuffle seeds and its per-fold scores are
 averaged over them; because real and shuffled data share identical folds, the
 momentum signal is the \emph{paired} per-fold gain of real over null (its
 standard error removes the fold-to-fold difficulty that dominates the unpaired
-error bars), reported with its spread across seeds. If the gain is within its
-error bar, order carries no detectable predictive information.
+error bars, here $\pm10\times10^{-4}$ for men), reported with its spread across
+seeds. If the gain is within its error bar, order carries no detectable
+predictive information.
 
 \begin{table}[h]
 \centering\small
-\caption{Predictive performance on real vs.\ order-shuffled data (mean $\pm$ s.e.\
-over 10 temporal folds). Lower log-loss/Brier is better; higher AUC is better.}
+\caption{Real vs.\ order-shuffled data. Log-loss is the mean over 10 temporal
+folds (null: mean over 3 seeds). Gain = paired per-fold log-loss improvement of
+real over null ($\times10^{-4}$, $\pm$ s.e.); seed s.d.\ is its spread across
+shuffle seeds.}
 \label{tab:shuffle}
-\begin{tabular}{llccc}
+\begin{tabular}{llcccccc}
 \toprule
-Model & Data & Log-loss $\downarrow$ & Brier $\downarrow$ & AUC $\uparrow$ \\
+Tour & Model & \multicolumn{2}{c}{Log-loss} & Gain & $t$ & Real & Seed \\
+ & & real & null & ($\times10^{-4}$) & & better & s.d. \\
 \midrule
-Logistic reg.   & real     & \ph{0.000} & \ph{0.000} & \ph{0.000} \\
-                & shuffled & \ph{0.000} & \ph{0.000} & \ph{0.000} \\
-Grad. boosting  & real     & \ph{0.000} & \ph{0.000} & \ph{0.000} \\
-                & shuffled & \ph{0.000} & \ph{0.000} & \ph{0.000} \\
-Relational RNN  & real     & \ph{0.000} & \ph{0.000} & \ph{0.000} \\
-                & shuffled & \ph{0.000} & \ph{0.000} & \ph{0.000} \\
+Men   & Logistic reg.  & 0.6483 & 0.6484 & $+1.2\pm1.7$ & $+0.7$ & 7/10 & 1.8 \\
+      & Grad.\ boosting & 0.6480 & 0.6478 & $-1.8\pm0.7$ & $-2.7$ & 3/10 & 0.5 \\
+      & Relational RNN & \ph{0.000} & \ph{0.000} & \ph{$\pm$} & \ph{} & \ph{/10} & \ph{} \\
+Women & Logistic reg.  & 0.6793 & 0.6793 & $+0.4\pm0.2$ & $+2.0$ & 7/10 & 0.2 \\
+      & Grad.\ boosting & 0.6794 & 0.6794 & $+0.0\pm0.3$ & $+0.1$ & 4/10 & 0.3 \\
+      & Relational RNN & \ph{0.000} & \ph{0.000} & \ph{$\pm$} & \ph{} & \ph{/10} & \ph{} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
+No model gains from point order. Three of the four gains are within about
+two standard errors of zero, and the largest positive one (women, logistic
+regression, $+0.4\times10^{-4}$) is the size of the court-side and first-point
+effects the null removes (see the caveat below), so it is not momentum. For men,
+boosting is slightly \emph{better on the null} ($t=-2.7$): with a game's points
+made exchangeable, the in-game score predicts the remaining points a little
+better than in real play. This points away from momentum, not towards it.
+Tuning was centred: the middle grid value was chosen in 9--10 of the 10 folds
+for every model and tour.
+
 \subsection{R2 --- Memory horizon}
-Figure~\ref{fig:results}(a) plots predictive gain over the zero-history baseline
-as history length grows. The point at which the curve flattens is the
-\emph{momentum horizon}; a curve that never rises above its error band is
-evidence of no exploitable memory.
+Figure~\ref{fig:results}(a) plots the gain over the zero-history base (pre-match
+and serve features only) as in-match history is added. It rises steadily, with
+no plateau: at $H{=}10$ points the gain is $3.3\pm0.4$ (men, logistic
+regression), at $H{=}50$ it is $4.6\pm0.6$, and the whole match gives
+$7.3\pm0.7$; women follow the same shape at a slightly lower level ($6.2\pm0.6$
+for the whole match). The largest single step is from 50 points to the whole
+match, which adds the set and match score, each player's serve record over the
+match, the Bayesian serve estimate and breaks. Recomputing every exponentially
+weighted feature from only the last $H$ points lowers the middle of the curve by
+about $0.5$--$1\times10^{-4}$ but leaves its shape unchanged. The useful
+in-match information is therefore long-range --- how each player has served
+across the match, and the scoreboard --- rather than a short burst of recent
+points.
 
 \subsection{R3 --- Base vs full}
 Each model is trained twice on identical folds: a \emph{base} model given only
 pre-match information and who is serving (ratings, serve/return expectations,
 rest, head-to-head; no score and no earlier points), and the \emph{full} model
 given every feature. Figure~\ref{fig:results}(b) shows the paired per-fold gain
-of full over base. This is an upper bound on what momentum could contribute:
-the in-match features also carry the score and within-match form, which help
-without any momentum. Read against R1, it says how much of the in-match
-information is order (momentum) rather than state (score, form) --- e.g.\ a
-large full-over-base gain with a negligible real-over-null gain means the match
-situation matters but the order of points does not.
+of full over base: $7.3\pm0.7$ (men, logistic regression), $7.2\pm0.9$ (men,
+boosting), $6.2\pm0.6$ and $5.5\pm0.5$ (women), better on all 10 folds in every
+case, with AUC up by about $0.002$. This is the whole in-match signal --- score,
+form and any momentum together --- and an upper bound on what momentum could
+contribute. Read against R1, order accounts for none of it: the match situation
+matters, but the order of points does not.
 
 \begin{figure}[h]
 \centering
-% FIGURE PLACEHOLDER: replace the two \fbox boxes with:
-%   \includegraphics[width=\linewidth]{figures/memory_horizon.pdf}
-%   \includegraphics[width=\linewidth]{figures/base_vs_full.pdf}
-\begin{subfigure}{0.49\linewidth}\centering
-  \fbox{\parbox[c][2.9cm][c]{0.9\linewidth}{\centering\footnotesize (a) Memory-horizon
-  curve\\ \textit{make\_figures.py}}}
+\begin{subfigure}{0.62\linewidth}\centering
+  \includegraphics[width=\linewidth]{figures/memory_horizon.pdf}
   \caption{Memory horizon}
 \end{subfigure}\hfill
-\begin{subfigure}{0.49\linewidth}\centering
-  \fbox{\parbox[c][2.9cm][c]{0.9\linewidth}{\centering\footnotesize (b) Gain of
-  full over base\\ \textit{make\_figures.py}}}
+\begin{subfigure}{0.36\linewidth}\centering
+  \includegraphics[width=\linewidth]{figures/base_vs_full.pdf}
   \caption{Base vs.\ full}
 \end{subfigure}
-\caption{(a) Predictive gain vs.\ history length with error bars; the plateau is
-the momentum horizon. (b) Paired log-loss gain of the full model over the
-pre-match base model, per tour and model, with error bars over folds.}
+\caption{(a) Paired log-loss gain over the zero-history base as history length
+grows, per tour and model, with error bars over folds. (b) Paired log-loss gain
+of the full model over the pre-match base model.}
 \label{fig:results}
 \end{figure}
 
@@ -333,11 +351,14 @@ We have framed tennis momentum as a falsifiable question --- whether point
 \emph{order} predicts the next point beyond serve, score and strength, and over
 what horizon --- and built a from-scratch pipeline (temporal nested
 cross-validation, hand-implemented metrics, three models of increasing
-complexity) whose controls make either answer defensible. \ph{State the
-finding once numbers are in: e.g.\ ``momentum contributes a small but
-statistically detectable gain that saturates within $k$ points'', or ``no
-predictive momentum is detectable above the shuffle null, although the match
-situation adds $x$ in log-loss over pre-match information''.} The methodological
+complexity) whose controls make either answer defensible. No predictive
+momentum is detectable above the shuffle null: the order of points adds at most
+about $10^{-4}$ in log-loss, within its error bars, although the match situation
+adds $5.5$--$7.3\times10^{-4}$ over pre-match information. That in-match
+information is long-range --- serve form across the match and the scoreboard ---
+rather than a recent run of points. \ph{Relational RNN result, which tests
+whether a model reading the raw point sequence finds order the features miss.}
+The methodological
 contribution --- controlling for the serve, score and strength confound, and
 separating order from match state --- is what separates a real answer from the
 spurious streak effects that the literature warns against.
