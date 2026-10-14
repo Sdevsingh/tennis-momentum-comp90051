@@ -1,0 +1,39 @@
+{
+  "status": "PARTIAL - run in progress",
+  "experiment": "exp1_shuffle_control --models rmc --seeds 51",
+  "run_started": "2026-10-14 11:39",
+  "dataset": "real",
+  "tour": "men",
+  "model": "rmc",
+  "source": "summary line printed by the running job (6_exp1_rnn.log); the job writes its full JSON (per-fold scores, null, paired gain) and predictions only when it finishes",
+  "summary": {
+    "log_loss": {
+      "mean": 0.6498,
+      "se": 0.001,
+      "n": 10
+    },
+    "brier": {
+      "mean": 0.2287,
+      "se": 0.0005,
+      "n": 10
+    },
+    "auc": {
+      "mean": 0.6645,
+      "se": 0.002,
+      "n": 10
+    }
+  },
+  "for_comparison_same_folds": {
+    "logreg": {
+      "log_loss": 0.6483,
+      "brier": 0.2281,
+      "auc": 0.6684
+    },
+    "gboost": {
+      "log_loss": 0.648,
+      "brier": 0.2279,
+      "auc": 0.6689
+    }
+  },
+  "log_line": "[real/men/rmc] log_loss=0.6498�0.0010, brier=0.2287�0.0005, auc=0.6645�0.0020"
+}
