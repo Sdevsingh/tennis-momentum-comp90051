@@ -22,6 +22,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Qualitative palette (Paul Tol): green, purple, blue, rose. Colourblind-safe
+# and print-friendly, and deliberately not matplotlib's default blue/orange.
+PALETTE = ["#117733", "#AA4499", "#4477AA", "#CC6677", "#DDCC77"]
+plt.rcParams["axes.prop_cycle"] = plt.cycler(color=PALETTE)
+
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS = ROOT / "results"
 FIGDIR = Path(__file__).resolve().parent / "figures"
@@ -165,19 +170,50 @@ def calibration_figure(name: str = "exp1_shuffle_control_logreg-gboost",
     panel per tour, with the share of points per bin underneath. Bins come from
     src/metrics.calibration_bins (from scratch); bins with < min_count points
     are dropped. ECE = point-weighted mean |observed - predicted|."""
-    import sys
+    import sys, csv as _csv
     sys.path.insert(0, str(ROOT))
-    import pyarrow.parquet as pq
-    from src.metrics import calibration_bins
 
+    # Prefer the saved out-of-fold predictions (recompute the bins from scratch).
+    # If they are not present (not committed), fall back to the plotted values
+    # saved in figures/calibration.csv, so the figure can still be recoloured.
     path = RESULTS / "predictions" / f"{name}.parquet"
-    if not path.exists():
-        print(f"  [skip] {path.name} not found — run exp1 first.")
-        return
-    df = pq.read_table(path, columns=["dataset", "tour", "model", "y", "p"],
-                       filters=[("dataset", "=", "real")]).to_pandas()
-    groups = [g for g in _GROUPS if g in set(df["tour"].astype(str))]
-    models = list(dict.fromkeys(df["model"].astype(str)))
+    series = {}                       # (tour, model) -> (pred, obs, cnt, ece)
+    if path.exists():
+        import pyarrow.parquet as pq
+        from src.metrics import calibration_bins
+        df = pq.read_table(path, columns=["dataset", "tour", "model", "y", "p"],
+                           filters=[("dataset", "=", "real")]).to_pandas()
+        groups = [g for g in _GROUPS if g in set(df["tour"].astype(str))]
+        models = list(dict.fromkeys(df["model"].astype(str)))
+        for group in groups:
+            for model in models:
+                d = df[(df["tour"] == group) & (df["model"] == model)]
+                y, p = d["y"].to_numpy(float), d["p"].to_numpy(float)
+                pred, obs, cnt = calibration_bins(y, p, n_bins=n_bins)
+                ece = float(np.nansum(cnt * np.abs(obs - pred)) / cnt.sum())
+                series[(group, model)] = (pred, obs, cnt, ece)
+    else:
+        csv_path = FIGDIR / "calibration.csv"
+        if not csv_path.exists():
+            print(f"  [skip] no predictions parquet and no {csv_path.name} — run exp1 first.")
+            return
+        print(f"  [calibration] predictions parquet not found; redrawing from {csv_path.name}")
+        acc = {}
+        with open(csv_path) as f:
+            for r in _csv.DictReader(f):
+                key = (r["tour"], r["model"])
+                acc.setdefault(key, []).append(
+                    (int(r["bin"]), float(r["mean_pred"]), float(r["obs_freq"]),
+                     int(r["count"]), float(r["ece"])))
+        nb = n_bins
+        for key, recs in acc.items():
+            pred, obs, cnt = (np.full(nb, np.nan), np.full(nb, np.nan), np.zeros(nb))
+            ece = recs[0][4]
+            for b, mp, of, c, e in recs:
+                pred[b], obs[b], cnt[b], ece = mp, of, c, e
+            series[key] = (pred, obs, cnt, ece)
+        groups = [g for g in _GROUPS if any(k[0] == g for k in series)]
+        models = list(dict.fromkeys(k[1] for k in series))
 
     fig, axes = plt.subplots(2, len(groups), figsize=(3.4 * len(groups), 3.6), squeeze=False,
                              gridspec_kw={"height_ratios": [3, 1]}, sharex="col")
@@ -186,16 +222,16 @@ def calibration_figure(name: str = "exp1_shuffle_control_logreg-gboost",
         ax, hx = axes[0][j], axes[1][j]
         lo, hi = 1.0, 0.0
         for i, model in enumerate(models):
-            d = df[(df["tour"] == group) & (df["model"] == model)]
-            y, p = d["y"].to_numpy(float), d["p"].to_numpy(float)
-            pred, obs, cnt = calibration_bins(y, p, n_bins=n_bins)
+            if (group, model) not in series:
+                continue
+            pred, obs, cnt, ece = series[(group, model)]
             keep = cnt >= min_count
-            ece = float(np.nansum(cnt * np.abs(obs - pred)) / cnt.sum())
-            ax.plot(pred[keep], obs[keep], marker="o", ms=4, lw=1.5, color=f"C{i}",
+            col = PALETTE[i % len(PALETTE)]
+            ax.plot(pred[keep], obs[keep], marker="o", ms=4, lw=1.5, color=col,
                     label=f"{model} (ECE {ece:.4f})")
             w = 1.0 / n_bins
             hx.bar(pred[keep] + (i - 0.5) * w * 0.4, cnt[keep] / cnt.sum(), width=w * 0.4,
-                   color=f"C{i}", alpha=0.8)
+                   color=col, alpha=0.8)
             lo, hi = min(lo, np.nanmin(pred[keep])), max(hi, np.nanmax(pred[keep]))
             rows += [{"tour": group, "model": model, "bin": b, "mean_pred": pred[b],
                       "obs_freq": obs[b], "count": int(cnt[b]), "ece": ece}
