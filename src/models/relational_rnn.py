@@ -167,7 +167,7 @@ class RelationalRNN:
     def _split(self, X):
         """Flat X -> (sequence (N,T,d_step), static (N,n_static))."""
         cut = self.history * self.d_step
-        seq = X[:, :cut].reshape(-1, self.history, self.d_step)
+        seq = X[:, :cut].reshape(len(X), self.history, self.d_step)
         static = X[:, cut:]
         return seq.astype(np.float32), static.astype(np.float32)
 
@@ -210,7 +210,7 @@ class RelationalRNN:
         # all-zero sequence, valid flag included) so no match is on both sides.
         n = len(seq)
         cut = n - max(1, int(0.1 * n))
-        starts = np.flatnonzero(~seq.reshape(n, -1).any(axis=1))
+        starts = np.flatnonzero(~seq.reshape(n, self.history * self.d_step).any(axis=1))
         later = starts[starts >= cut]
         if len(later):
             cut = int(later[0])

@@ -42,23 +42,33 @@ Each H is run per tour (men and women get separate models and exp1's per-tour
 grids) unless --pooled, with the same temporal outer folds and forward-chaining
 inner CV as exp1.
 
-Runs logistic regression and gradient boosting (LightGBM). For the Relational
-RNN, H would be its input sequence length; it is not wired in here.
+Runs logistic regression and gradient boosting (LightGBM) by default.
+--models ... rmc adds the Relational RNN, for which H is literally its input
+sequence length: at every H it gets the same static MATCH + POINT_STRUCTURE
+features plus the raw last H points of the match (who won, who served, rally;
+src/sequences.py), and nothing older. H = 0 is the static features alone. The
+RNN's window tops out at RNN_HISTORY (60) points, so instead of "match" its
+last H is 60 -- exactly exp1's RNN input. Each finished (tour, H) is
+checkpointed to results/checkpoints/<output name>/<tour>/rmc_H<h>.json (+
+.parquet predictions) and reused on a rerun, because each H is a full nested
+CV taking up to ~13 hours on a laptop GPU.
 """
 from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from ..config import (PROCESSED_DIR, RESULTS_DIR, HISTORY_LENGTHS, N_OUTER_REPEATS,
-                      DECAY_RATES)
+                      DECAY_RATES, RNN_HISTORY)
 from ..features import build_features, FeatureScope, feature_columns, FEATURE_COLUMNS
 from ..cross_validation import temporal_match_splits
 from ..nested_cv import nested_cv
-from ..models import logistic_regression, gradient_boosting
+from ..models import logistic_regression, gradient_boosting, relational_rnn
+from ..sequences import build_sequence_matrix, STATIC_FEATURES
 from ..predictions import point_keys, prediction_frame, save_predictions
 from .exp1_shuffle_control import TOUR_GRIDS, matches_in_time_order, tour_of
 
@@ -66,7 +76,15 @@ from .exp1_shuffle_control import TOUR_GRIDS, matches_in_time_order, tour_of
 MODELS = {
     "logreg": (logistic_regression.make_model, logistic_regression.PARAM_GRID),
     "gboost": (gradient_boosting.make_model, gradient_boosting.PARAM_GRID),
+    "rmc":    (relational_rnn.make_model, relational_rnn.PARAM_GRID),
 }
+DEFAULT_MODELS = ["logreg", "gboost"]
+# The RNN's history lengths: HISTORY_LENGTHS up to its window, with its full
+# window (exp1's RNN input) in place of "match".
+RNN_HISTORY_LENGTHS = [h for h in HISTORY_LENGTHS
+                       if h != "match" and h < RNN_HISTORY] + [RNN_HISTORY]
+# Columns build_sequence_matrix reads
+_SEQ_COLUMNS = ["match_id", "point_server", "point_winner", "rally"]
 
 _GAME = 10                 # current-game state, see module docstring
 _WHOLE_MATCH = math.inf
@@ -199,19 +217,68 @@ def horizon_curve(feats: pd.DataFrame, y: np.ndarray, match_ids: np.ndarray,
     return curve
 
 
+def rnn_horizon_curve(feats: pd.DataFrame, y: np.ndarray, match_ids: np.ndarray,
+                      splits, grid, label: str, frames: list | None = None,
+                      labels: dict | None = None, ckpt: Path | None = None) -> dict:
+    """The RNN at each history length: the raw last H points (+ the static
+    features), H in RNN_HISTORY_LENGTHS. Finished H values are checkpointed
+    to ckpt/rmc_H<h>.json (+ .parquet predictions) and loaded on a rerun."""
+    keys = point_keys(feats) if frames is not None else None
+    seq_src = feats[_SEQ_COLUMNS + list(STATIC_FEATURES)]
+    curve = {}
+    for h in RNN_HISTORY_LENGTHS:
+        f = ckpt / f"rmc_H{h}.json" if ckpt is not None else None
+        if f is not None and f.exists():
+            curve[str(h)] = json.loads(f.read_text())
+            if frames is not None and f.with_suffix(".parquet").exists():
+                frames.append(pd.read_parquet(f.with_suffix(".parquet")))
+            print(f"  [{label}] H={h:>3} loaded from checkpoint {f}", flush=True)
+            continue
+        X_seq = build_sequence_matrix(seq_src, history=h)
+        make = lambda h=h, **p: relational_rnn.make_model(history=h, **p)
+        res = nested_cv(make, grid, X_seq, y, match_ids, splits)
+        del X_seq
+        s = res["summary"]
+        curve[str(h)] = {
+            "rnn_history": h,
+            "summary": s,
+            "per_split": res["per_split"],
+            "centring": {k: {str(v): n for v, n in c.items()}
+                         for k, c in res["centring"].items()},
+        }
+        fr = (prediction_frame(res, keys, **(labels or {}), H=h, ewma="none")
+              if frames is not None else None)
+        if fr is not None:
+            frames.append(fr)
+        if f is not None:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            if fr is not None:
+                fr.to_parquet(f.with_suffix(".parquet"))
+            f.write_text(json.dumps(curve[str(h)], indent=2))
+        print(f"  [{label}] H={h:>3} (raw points): log_loss={s['log_loss']['mean']:.4f}"
+              f"±{s['log_loss']['se']:.4f}  auc={s['auc']['mean']:.4f}", flush=True)
+    return curve
+
+
 def _run(feats: pd.DataFrame, label: str, tour: str | None, ewma: str = "lookback",
-         frames: list | None = None) -> dict:
+         frames: list | None = None, models: list[str] | None = None,
+         ckpt: Path | None = None) -> dict:
     y = feats["p1_won"].to_numpy()
     match_ids = feats["match_id"].to_numpy()
     ordered = matches_in_time_order(match_ids.tolist())   # year, then AO, RG, Wimbledon, USO
     splits = temporal_match_splits(ordered, n_parts=N_OUTER_REPEATS + 1)
     out = {}
-    for name, (make, grid) in MODELS.items():
+    for name in (models or DEFAULT_MODELS):
+        make, grid = MODELS[name]
         grid = TOUR_GRIDS.get(name, {}).get(tour, grid)
-        out[name] = {"grid": grid,
-                     "curve": horizon_curve(feats, y, match_ids, splits, make, grid,
-                                            f"{label}/{name}", ewma, frames,
-                                            {"tour": tour or "pooled", "model": name})}
+        labels = {"tour": tour or "pooled", "model": name}
+        if name == "rmc":
+            curve = rnn_horizon_curve(feats, y, match_ids, splits, grid, f"{label}/{name}",
+                                      frames, labels, ckpt)
+        else:
+            curve = horizon_curve(feats, y, match_ids, splits, make, grid,
+                                  f"{label}/{name}", ewma, frames, labels)
+        out[name] = {"grid": grid, "curve": curve}
     return out
 
 
@@ -223,13 +290,23 @@ def main() -> None:
     ap.add_argument("--ewma", choices=EWMA_MODES, default="lookback",
                     help="lookback: an EWMA enters at H >= 1/(1-decay); truncated: every "
                          "EWMA at every H, computed from only the last H points")
+    ap.add_argument("--models", nargs="+", choices=list(MODELS), default=DEFAULT_MODELS,
+                    help="models to run (default logreg gboost; rmc = the Relational RNN, "
+                         "hours per history length on a GPU)")
     args = ap.parse_args()
+    suffix = (("_pooled" if args.pooled else "")
+              + ("_ewma_truncated" if args.ewma == "truncated" else "")
+              + ("" if args.models == DEFAULT_MODELS else "_" + "-".join(args.models)))
+    dest = RESULTS_DIR / f"exp2_memory_horizon{suffix}.json"
+    ckpt_root = RESULTS_DIR / "checkpoints" / dest.stem
 
     pts = pd.read_parquet(PROCESSED_DIR / "points.parquet")
     feats = build_features(pts, player_won_col="p1_won")
     del pts
-    feats = feats[["match_id", "p1_won", "set_no", "game_no", "point_server"]
-                  + feature_cols_for_history("match")]
+    extra = ([c for c in ("point_winner", "rally") + tuple(STATIC_FEATURES)
+              if c not in feature_cols_for_history("match")] if "rmc" in args.models else [])
+    feats = feats[list(dict.fromkeys(["match_id", "p1_won", "set_no", "game_no", "point_server"]
+                                     + feature_cols_for_history("match") + extra))]
     frames: list = []
 
     results = {"by_tour": not args.pooled,
@@ -240,16 +317,18 @@ def main() -> None:
                             if c not in BASE_FEATURES]
                    for h in HISTORY_LENGTHS},
                "memory_lookback": {c: (None if math.isinf(v) else v)
-                                   for c, v in MEMORY_LOOKBACK.items()}}
+                                   for c, v in MEMORY_LOOKBACK.items()},
+               "models": args.models,
+               "rnn_history_lengths": RNN_HISTORY_LENGTHS if "rmc" in args.models else None}
     if args.pooled:
-        results["pooled"] = _run(feats, "pooled", None, args.ewma, frames)
+        results["pooled"] = _run(feats, "pooled", None, args.ewma, frames, args.models,
+                                 ckpt_root / "pooled")
     else:
         tours = tour_of(feats["match_id"]).to_numpy()
         for tour in ("men", "women"):
-            results[tour] = _run(feats[tours == tour], tour, tour, args.ewma, frames)
+            results[tour] = _run(feats[tours == tour], tour, tour, args.ewma, frames,
+                                 args.models, ckpt_root / tour)
 
-    suffix = ("_pooled" if args.pooled else "") + ("_ewma_truncated" if args.ewma == "truncated" else "")
-    dest = RESULTS_DIR / f"exp2_memory_horizon{suffix}.json"
     dest.write_text(json.dumps(results, indent=2))
     save_predictions(frames, dest.stem)
     print(f"\nWrote {dest}")
