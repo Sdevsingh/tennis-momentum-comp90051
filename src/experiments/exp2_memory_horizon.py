@@ -51,7 +51,10 @@ RNN's window tops out at RNN_HISTORY (60) points, so instead of "match" its
 last H is 60 -- exactly exp1's RNN input. Each finished (tour, H) is
 checkpointed to results/checkpoints/<output name>/<tour>/rmc_H<h>.json (+
 .parquet predictions) and reused on a rerun, because each H is a full nested
-CV taking up to ~13 hours on a laptop GPU.
+CV taking up to ~13 hours on a laptop GPU. For a faster run, --rnn-h picks
+the RNN's history lengths (e.g. 0 10 60) and --rnn-max-train caps each RNN
+fit to a random subset of that many training points (e.g. 40000); both are
+recorded in the output, whose name then says so.
 """
 from __future__ import annotations
 
@@ -219,14 +222,17 @@ def horizon_curve(feats: pd.DataFrame, y: np.ndarray, match_ids: np.ndarray,
 
 def rnn_horizon_curve(feats: pd.DataFrame, y: np.ndarray, match_ids: np.ndarray,
                       splits, grid, label: str, frames: list | None = None,
-                      labels: dict | None = None, ckpt: Path | None = None) -> dict:
+                      labels: dict | None = None, ckpt: Path | None = None,
+                      hs: list[int] | None = None, max_train: int | None = None) -> dict:
     """The RNN at each history length: the raw last H points (+ the static
-    features), H in RNN_HISTORY_LENGTHS. Finished H values are checkpointed
-    to ckpt/rmc_H<h>.json (+ .parquet predictions) and loaded on a rerun."""
+    features), H in `hs` (default RNN_HISTORY_LENGTHS). `max_train` caps each
+    fit to a random subset of training points (None = the whole fold).
+    Finished H values are checkpointed to ckpt/rmc_H<h>.json (+ .parquet
+    predictions) and loaded on a rerun."""
     keys = point_keys(feats) if frames is not None else None
     seq_src = feats[_SEQ_COLUMNS + list(STATIC_FEATURES)]
     curve = {}
-    for h in RNN_HISTORY_LENGTHS:
+    for h in (hs or RNN_HISTORY_LENGTHS):
         f = ckpt / f"rmc_H{h}.json" if ckpt is not None else None
         if f is not None and f.exists():
             curve[str(h)] = json.loads(f.read_text())
@@ -235,12 +241,14 @@ def rnn_horizon_curve(feats: pd.DataFrame, y: np.ndarray, match_ids: np.ndarray,
             print(f"  [{label}] H={h:>3} loaded from checkpoint {f}", flush=True)
             continue
         X_seq = build_sequence_matrix(seq_src, history=h)
-        make = lambda h=h, **p: relational_rnn.make_model(history=h, **p)
+        cap = {} if max_train is None else {"max_train": max_train}
+        make = lambda h=h, **p: relational_rnn.make_model(history=h, **cap, **p)
         res = nested_cv(make, grid, X_seq, y, match_ids, splits)
         del X_seq
         s = res["summary"]
         curve[str(h)] = {
             "rnn_history": h,
+            "max_train": max_train,
             "summary": s,
             "per_split": res["per_split"],
             "centring": {k: {str(v): n for v, n in c.items()}
@@ -262,7 +270,8 @@ def rnn_horizon_curve(feats: pd.DataFrame, y: np.ndarray, match_ids: np.ndarray,
 
 def _run(feats: pd.DataFrame, label: str, tour: str | None, ewma: str = "lookback",
          frames: list | None = None, models: list[str] | None = None,
-         ckpt: Path | None = None) -> dict:
+         ckpt: Path | None = None, rnn_h: list[int] | None = None,
+         rnn_max_train: int | None = None) -> dict:
     y = feats["p1_won"].to_numpy()
     match_ids = feats["match_id"].to_numpy()
     ordered = matches_in_time_order(match_ids.tolist())   # year, then AO, RG, Wimbledon, USO
@@ -274,7 +283,7 @@ def _run(feats: pd.DataFrame, label: str, tour: str | None, ewma: str = "lookbac
         labels = {"tour": tour or "pooled", "model": name}
         if name == "rmc":
             curve = rnn_horizon_curve(feats, y, match_ids, splits, grid, f"{label}/{name}",
-                                      frames, labels, ckpt)
+                                      frames, labels, ckpt, rnn_h, rnn_max_train)
         else:
             curve = horizon_curve(feats, y, match_ids, splits, make, grid,
                                   f"{label}/{name}", ewma, frames, labels)
@@ -293,10 +302,23 @@ def main() -> None:
     ap.add_argument("--models", nargs="+", choices=list(MODELS), default=DEFAULT_MODELS,
                     help="models to run (default logreg gboost; rmc = the Relational RNN, "
                          "hours per history length on a GPU)")
+    ap.add_argument("--rnn-h", type=int, nargs="+", default=None,
+                    help=f"the RNN's history lengths (default {RNN_HISTORY_LENGTHS})")
+    ap.add_argument("--rnn-max-train", type=int, default=None,
+                    help="cap each RNN fit to this many random training points (default: no cap)")
     args = ap.parse_args()
+    if args.rnn_h is not None:
+        bad = [h for h in args.rnn_h if not 0 <= h <= RNN_HISTORY]
+        if bad:
+            ap.error(f"--rnn-h values must be between 0 and {RNN_HISTORY}: {bad}")
+    rnn_h = args.rnn_h or RNN_HISTORY_LENGTHS
     suffix = (("_pooled" if args.pooled else "")
               + ("_ewma_truncated" if args.ewma == "truncated" else "")
-              + ("" if args.models == DEFAULT_MODELS else "_" + "-".join(args.models)))
+              + ("" if args.models == DEFAULT_MODELS else "_" + "-".join(args.models))
+              + ("" if "rmc" not in args.models or args.rnn_h is None
+                 else "_H" + "-".join(map(str, rnn_h)))
+              + ("" if "rmc" not in args.models or args.rnn_max_train is None
+                 else f"_cap{args.rnn_max_train}"))
     dest = RESULTS_DIR / f"exp2_memory_horizon{suffix}.json"
     ckpt_root = RESULTS_DIR / "checkpoints" / dest.stem
 
@@ -319,15 +341,16 @@ def main() -> None:
                "memory_lookback": {c: (None if math.isinf(v) else v)
                                    for c, v in MEMORY_LOOKBACK.items()},
                "models": args.models,
-               "rnn_history_lengths": RNN_HISTORY_LENGTHS if "rmc" in args.models else None}
+               "rnn_history_lengths": rnn_h if "rmc" in args.models else None,
+               "rnn_max_train": args.rnn_max_train if "rmc" in args.models else None}
     if args.pooled:
         results["pooled"] = _run(feats, "pooled", None, args.ewma, frames, args.models,
-                                 ckpt_root / "pooled")
+                                 ckpt_root / "pooled", rnn_h, args.rnn_max_train)
     else:
         tours = tour_of(feats["match_id"]).to_numpy()
         for tour in ("men", "women"):
             results[tour] = _run(feats[tours == tour], tour, tour, args.ewma, frames,
-                                 args.models, ckpt_root / tour)
+                                 args.models, ckpt_root / tour, rnn_h, args.rnn_max_train)
 
     dest.write_text(json.dumps(results, indent=2))
     save_predictions(frames, dest.stem)
